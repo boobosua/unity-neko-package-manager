@@ -1,0 +1,19 @@
+{
+  "name": "com.nekoindie.nekounity.nupm",
+  "version": "1.0.0",
+  "displayName": "Neko Unity Package Manager (NUPM)",
+  "description": "A custom package manager for Neko Unity libraries with dependency resolution and Git integration.",
+  "unity": "2020.3",
+  "dependencies": {},
+  "author": {
+    "name": "Nguyen Thanh Trung",
+    "url": "https://github.com/boobosua"
+  },
+  "keywords": [
+    "package manager",
+    "neko",
+    "dependencies",
+    "git",
+    "unity"
+  ]
+}
