@@ -8,53 +8,47 @@ namespace NUPM
     public class DependencyResolver
     {
         /// <summary>
-        /// Resolves dependencies and returns them in installation order
+        /// Resolve a dependency name to a PackageInfo (e.g., via fetched catalog)
         /// </summary>
-        public List<PackageInfo> ResolveDependencies(PackageInfo rootPackage, List<PackageInfo> availablePackages)
+        public delegate bool TryResolve(string depName, out PackageInfo pkg);
+
+        /// <summary>
+        /// Resolves dependencies and returns them in installation order (deps → root).
+        /// </summary>
+        public List<PackageInfo> ResolveDependencies(PackageInfo rootPackage, TryResolve resolver)
         {
             var resolved = new List<PackageInfo>();
             var visited = new HashSet<string>();
             var visiting = new HashSet<string>();
-
-            // Create lookup for faster access
-            var packageLookup = new Dictionary<string, PackageInfo>();
-            foreach (var pkg in availablePackages)
-            {
-                packageLookup[pkg.name] = pkg;
-            }
-
-            ResolveDependenciesRecursive(rootPackage, packageLookup, resolved, visited, visiting);
+            ResolveRecursive(rootPackage, resolver, resolved, visited, visiting);
             return resolved;
         }
 
-        private void ResolveDependenciesRecursive(PackageInfo package, Dictionary<string, PackageInfo> packageLookup,
-            List<PackageInfo> resolved, HashSet<string> visited, HashSet<string> visiting)
+        private void ResolveRecursive(
+            PackageInfo package,
+            TryResolve resolver,
+            List<PackageInfo> resolved,
+            HashSet<string> visited,
+            HashSet<string> visiting)
         {
             if (visited.Contains(package.name)) return;
 
             if (visiting.Contains(package.name))
-            {
                 throw new InvalidOperationException($"Circular dependency detected involving {package.name}");
-            }
 
             visiting.Add(package.name);
 
-            // Resolve dependencies first
             if (package.dependencies != null)
             {
                 foreach (var depName in package.dependencies)
                 {
-                    // Skip Unity built-in packages
-                    if (depName.StartsWith("com.unity.")) continue;
+                    if (string.IsNullOrEmpty(depName)) continue;
+                    if (depName.StartsWith("com.unity.")) continue; // Unity built-ins
 
-                    if (packageLookup.TryGetValue(depName, out PackageInfo depPackage))
-                    {
-                        ResolveDependenciesRecursive(depPackage, packageLookup, resolved, visited, visiting);
-                    }
+                    if (resolver(depName, out var depPackage))
+                        ResolveRecursive(depPackage, resolver, resolved, visited, visiting);
                     else
-                    {
-                        Debug.LogWarning($"[NUPM] Dependency '{depName}' not found");
-                    }
+                        Debug.LogWarning($"[NUPM] Dependency '{depName}' not found in known sources; will skip auto-install.");
                 }
             }
 

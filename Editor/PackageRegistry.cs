@@ -1,71 +1,55 @@
 #if UNITY_EDITOR
+using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using UnityEngine;
 
 namespace NUPM
 {
+    /// <summary>
+    /// Dynamic registry that pulls package info from the internal registry.
+    /// </summary>
     public static class PackageRegistry
     {
-        /// <summary>
-        /// Gets all available Neko packages with their dependencies
-        /// </summary>
-        public static List<PackageInfo> GetAvailablePackages()
+        private static readonly Dictionary<string, PackageInfo> _byName = new();
+        private static readonly Dictionary<string, PackageInfo> _byGit = new();
+
+        public static async Task<List<PackageInfo>> RefreshAsync()
         {
-            return new List<PackageInfo>
+            _byName.Clear();
+            _byGit.Clear();
+
+            var list = new List<PackageInfo>();
+            foreach (var (gitUrl, deps) in InternalRegistry.Packages)
             {
-                // Core library - no dependencies
-                new(
-                    "com.neko.lib",
-                    "Neko Lib",
-                    "1.0.0",
-                    "Core library providing fundamental utilities, extensions, and base classes for all Neko packages.",
-                    "https://github.com/boobosua/unity-nekolib.git"
-                ),
-                
-                // Serialization system - depends on core lib and Newtonsoft JSON
-                new(
-                    "com.neko.serialize",
-                    "Neko Serialize",
-                    "1.0.0",
-                    "Advanced serialization system with JSON support, custom serializers, and Unity-specific serialization utilities.",
-                    "https://github.com/boobosua/unity-neko-serialize.git",
-                    "com.neko.lib", "com.unity.nuget.newtonsoft-json"
-                ),
-                
-                // Visual scripting and state management - depends on core lib
-                new(
-                    "com.neko.flow",
-                    "Neko Flow",
-                    "1.0.0",
-                    "Visual scripting and state management system for Unity projects with node-based scripting and state machines.",
-                    "https://github.com/boobosua/unity-neko-flow.git",
-                    "com.neko.lib"
-                ),
-                
-                // Event system - depends on core lib
-                new(
-                    "com.neko.signal",
-                    "Neko Signal",
-                    "1.0.0",
-                    "Event-driven communication system with type-safe signals and observers for decoupled architecture.",
-                    "https://github.com/boobosua/unity-neko-signal.git",
-                    "com.neko.lib"
-                )
-            };
+                try
+                {
+                    var info = await GitMetadataFetcher.FetchAsync(gitUrl);
+                    if (info == null || string.IsNullOrEmpty(info.name)) continue;
+
+                    if (deps != null && deps.Length > 0)
+                    {
+                        foreach (var d in deps)
+                            if (!info.dependencies.Contains(d))
+                                info.dependencies.Add(d);
+                    }
+
+                    list.Add(info);
+                    _byName[info.name] = info;
+                    _byGit[gitUrl] = info;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[NUPM] Failed to fetch metadata from {gitUrl}: {e.Message}");
+                }
+            }
+
+            return list;
         }
 
-        /// <summary>
-        /// Gets a specific package by name
-        /// </summary>
-        public static PackageInfo GetPackageInfo(string packageName)
-        {
-            var packages = GetAvailablePackages();
-            foreach (var package in packages)
-            {
-                if (package.name == packageName)
-                    return package;
-            }
-            return null;
-        }
+        public static bool TryGetByName(string name, out PackageInfo pkg) => _byName.TryGetValue(name, out pkg);
+        public static bool TryGetByGit(string git, out PackageInfo pkg) => _byGit.TryGetValue(git, out pkg);
+        public static IEnumerable<PackageInfo> AllCached() => _byName.Values;
     }
 }
 #endif

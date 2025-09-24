@@ -13,7 +13,7 @@ namespace NUPM
         public string description;
         public string gitUrl;
         public List<string> dependencies;
-        
+
         public PackageInfo()
         {
             name = "";
@@ -23,7 +23,7 @@ namespace NUPM
             gitUrl = "";
             dependencies = new List<string>();
         }
-        
+
         public PackageInfo(string name, string displayName, string version, string description, string gitUrl, params string[] deps)
         {
             this.name = name ?? "";
@@ -32,23 +32,14 @@ namespace NUPM
             this.description = description ?? "";
             this.gitUrl = gitUrl ?? "";
             this.dependencies = new List<string>();
-            
             if (deps != null)
             {
-                foreach (string dep in deps)
-                {
-                    if (!string.IsNullOrEmpty(dep))
-                    {
-                        this.dependencies.Add(dep);
-                    }
-                }
+                foreach (var d in deps)
+                    if (!string.IsNullOrEmpty(d)) this.dependencies.Add(d);
             }
         }
-        
-        public override string ToString()
-        {
-            return $"{displayName} ({name}) v{version}";
-        }
+
+        public override string ToString() => $"{displayName} ({name}) v{version}";
     }
 }
 #endif
