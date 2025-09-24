@@ -52,60 +52,6 @@ Click **Update** to install the latest version from Git.
 In the **Installed** tab, click **Uninstall** to remove a package.  
 This syncs with UPM – if removed directly from UPM, NUPM updates too.
 
-## Example Registry
-
-You configure your package registry in code (not exposed to end users):
-
-```csharp
-// InternalRegistry.cs (example)
-internal static class InternalRegistry
-{
-    public static readonly PackageInfo[] Packages = new[]
-    {
-        new PackageInfo
-        {
-            name = "com.neko.flow",
-            displayName = "NekoFlow",
-            version = "1.0.0",
-            url = "https://github.com/boobosua/unity-neko-flow.git",
-            description = "Simple finite state machine for Unity with fluent API",
-            dependencies = new List<string>()
-        },
-        new PackageInfo
-        {
-            name = "com.neko.tween",
-            displayName = "NekoTween",
-            version = "1.0.0",
-            url = "https://github.com/boobosua/unity-neko-tween.git",
-            description = "Tweening library with clean API",
-            dependencies = new List<string>{ "com.neko.flow" }
-        }
-    };
-}
-```
-
-## UI Preview
-
-```
-┌──────────────────────────────────────────────┐
-│ NekoTween (Update available)                 │
-│ Name: com.neko.tween                         │
-│ Version: 1.0.0                               │
-│ A clean tweening library for Unity.          │
-│ Dependencies: com.neko.flow                  │
-│                                  [Update]    │
-│                                  [Uninstall] │
-└──────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────┐
-│ NekoFlow                                     │
-│ Name: com.neko.flow                          │
-│ Version: 1.0.0                               │
-│ A simple FSM library with fluent API.        │
-│                                  [Install]   │
-└──────────────────────────────────────────────┘
-```
-
 ## API
 
 ### PackageInstaller
