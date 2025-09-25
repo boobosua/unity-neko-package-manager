@@ -4,25 +4,29 @@ using System.Collections.Generic;
 namespace NUPM
 {
     /// <summary>
-    /// Internal, private registry for all custom Neko packages.
-    /// Edit this list only when releasing a new version of your package.
+    /// Private, code-only registry. Edit this list when you release/update your packages.
+    /// This registry is metadata only; it does NOT auto-install anything.
     /// </summary>
     internal static class InternalRegistry
     {
-        // Tuple: (gitUrl, dependencyNames)
+        // (gitUrl, extraDependencyNames)
+        // NOTE: Use Unity package names in deps (e.g. "com.neko.lib", "com.unity.nuget.newtonsoft-json")
         public static readonly List<(string gitUrl, string[] deps)> Packages = new()
         {
-            // Core library - no dependencies
-            ("https://github.com/boobosua/unity-nekolib.git", new string[] { }),
+            // Core lib (no deps)
+            ("https://github.com/boobosua/unity-nekolib.git", new string[] {}),
 
-            // Serialization - depends on core + Newtonsoft JSON
-            ("https://github.com/boobosua/unity-neko-serialize.git", new [] { "com.neko.lib", "com.unity.nuget.newtonsoft-json" }),
+            // Serialize -> depends on core lib + Newtonsoft JSON (built-in)
+            ("https://github.com/boobosua/unity-neko-serialize.git",
+                new [] { "com.neko.lib", "com.unity.nuget.newtonsoft-json" }),
 
-            // Flow - depends on core
-            ("https://github.com/boobosua/unity-neko-flow.git", new [] { "com.neko.lib" }),
+            // Signal -> depends on core lib
+            ("https://github.com/boobosua/unity-neko-signal.git",
+                new [] { "com.neko.lib" }),
 
-            // Signal - depends on core
-            ("https://github.com/boobosua/unity-neko-signal.git", new [] { "com.neko.lib" }),
+            // Flow -> depends on core lib
+            ("https://github.com/boobosua/unity-neko-flow.git",
+                new [] { "com.neko.lib" }),
         };
     }
 }

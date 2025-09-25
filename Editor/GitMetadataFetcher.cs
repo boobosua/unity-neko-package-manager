@@ -3,18 +3,15 @@ using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using UnityEngine;
 using UnityEngine.Networking;
 
 namespace NUPM
 {
     /// <summary>
-    /// Fetches Unity package metadata (package.json) directly from a GitHub URL.
-    /// Supports optional "#path=..." fragment for subfolder UPM layout.
+    /// Fetches package.json metadata from a GitHub repo URL (supports optional '#path=...').
     /// </summary>
-    public static class GitMetadataFetcher
+    internal static class GitMetadataFetcher
     {
-        // Matches https://github.com/{owner}/{repo}.git[#path=...]
         private static readonly Regex GithubRepoRx =
             new Regex(@"^https?://github\.com/(?<owner>[^/]+)/(?<repo>[^/#\.]+)(?:\.git)?(?<frag>.*)$",
                       RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -24,35 +21,30 @@ namespace NUPM
             if (string.IsNullOrEmpty(gitUrl))
                 throw new ArgumentException("gitUrl is null or empty");
 
-            if (!GithubRepoRx.IsMatch(gitUrl))
+            var m = GithubRepoRx.Match(gitUrl);
+            if (!m.Success)
                 throw new NotSupportedException($"Unsupported git URL: {gitUrl}");
 
-            var m = GithubRepoRx.Match(gitUrl);
             var owner = m.Groups["owner"].Value;
             var repo = m.Groups["repo"].Value;
-            var frag = m.Groups["frag"].Value; // may contain #path=...
+            var frag = m.Groups["frag"].Value; // may contain '#path=...'
 
             var path = ExtractPathFragment(frag);
-            var candidatePaths = new List<string>();
-            if (!string.IsNullOrEmpty(path))
-                candidatePaths.Add($"{path.TrimEnd('/')}/package.json");
-            else
-                candidatePaths.Add("package.json");
-
+            var candidates = new List<string> { string.IsNullOrEmpty(path) ? "package.json" : $"{path.TrimEnd('/')}/package.json" };
             var branches = new[] { "main", "master" };
 
-            foreach (var branch in branches)
+            foreach (var br in branches)
             {
-                foreach (var relPath in candidatePaths)
+                foreach (var rel in candidates)
                 {
-                    var raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{relPath}";
-                    string json = await TryDownloadText(raw);
+                    var raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{br}/{rel}";
+                    var json = await TryDownloadText(raw);
                     if (!string.IsNullOrEmpty(json))
                         return ParsePackageJson(json, gitUrl);
                 }
             }
 
-            throw new Exception($"package.json not found at expected locations for {gitUrl}");
+            throw new Exception($"package.json not found for {gitUrl} (try appending '#path=Packages/<folder>')");
         }
 
         private static string ExtractPathFragment(string frag)
@@ -66,39 +58,39 @@ namespace NUPM
         private static async Task<string> TryDownloadText(string url)
         {
             using var req = UnityWebRequest.Get(url);
-            req.timeout = 10;
+            req.timeout = 12;
             var op = req.SendWebRequest();
             while (!op.isDone) await Task.Yield();
 
 #if UNITY_2020_2_OR_NEWER
             if (req.result != UnityWebRequest.Result.Success) return null;
 #else
-            if (req.isNetworkError || req.isHttpError) return null;
+            if (req.isHttpError || req.isNetworkError) return null;
 #endif
             return req.downloadHandler.text;
         }
 
         private static PackageInfo ParsePackageJson(string json, string gitUrl)
         {
-            string name = ExtractString(json, "\"name\"");
-            string displayName = ExtractString(json, "\"displayName\"");
-            string version = ExtractString(json, "\"version\"");
-            string description = ExtractString(json, "\"description\"");
+            string name = Extract(json, "\"name\"");
+            string displayName = Extract(json, "\"displayName\"");
+            string version = Extract(json, "\"version\"");
+            string description = Extract(json, "\"description\"");
             var deps = ExtractDependencies(json);
 
             if (string.IsNullOrEmpty(displayName)) displayName = name ?? "";
-
-            return new PackageInfo(
-                name ?? "",
-                displayName ?? "",
-                string.IsNullOrEmpty(version) ? "0.0.0" : version,
-                description ?? "",
-                gitUrl,
-                deps.ToArray()
-            );
+            return new PackageInfo
+            {
+                name = name ?? "",
+                displayName = displayName,
+                version = string.IsNullOrEmpty(version) ? "0.0.0" : version,
+                description = description ?? "",
+                gitUrl = gitUrl,
+                dependencies = deps
+            };
         }
 
-        private static string ExtractString(string json, string key)
+        private static string Extract(string json, string key)
         {
             var rx = new Regex(key + @"\s*:\s*""(?<v>[^""]+)""", RegexOptions.IgnoreCase);
             var m = rx.Match(json);
@@ -127,8 +119,9 @@ namespace NUPM
             var rx = new Regex(@"""(?<name>[^""]+)""\s*:\s*""(?<ver>[^""]+)""");
             foreach (Match m in rx.Matches(block))
             {
-                var depName = m.Groups["name"].Value.Trim();
-                if (!string.IsNullOrEmpty(depName)) list.Add(depName);
+                var dep = m.Groups["name"].Value.Trim();
+                if (!string.IsNullOrEmpty(dep))
+                    list.Add(dep);
             }
             return list;
         }

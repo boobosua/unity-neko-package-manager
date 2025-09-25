@@ -5,56 +5,58 @@ using UnityEngine;
 
 namespace NUPM
 {
-    public class DependencyResolver
+    /// <summary>
+    /// Pure resolver: returns install order (dependencies first, then root).
+    /// Does not hardcode any packages or install anything.
+    /// </summary>
+    internal sealed class DependencyResolver
     {
-        /// <summary>
-        /// Resolve a dependency name to a PackageInfo (e.g., via fetched catalog)
-        /// </summary>
-        public delegate bool TryResolve(string depName, out PackageInfo pkg);
-
-        /// <summary>
-        /// Resolves dependencies and returns them in installation order (deps → root).
-        /// </summary>
-        public List<PackageInfo> ResolveDependencies(PackageInfo rootPackage, TryResolve resolver)
+        public List<PackageInfo> ResolveDependencies(PackageInfo rootPackage, List<PackageInfo> availablePackages)
         {
+            if (rootPackage == null) throw new ArgumentNullException(nameof(rootPackage));
             var resolved = new List<PackageInfo>();
             var visited = new HashSet<string>();
             var visiting = new HashSet<string>();
-            ResolveRecursive(rootPackage, resolver, resolved, visited, visiting);
+
+            // name -> PackageInfo lookup
+            var map = new Dictionary<string, PackageInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in availablePackages) map[p.name] = p;
+
+            Visit(rootPackage, map, resolved, visited, visiting);
             return resolved;
         }
 
-        private void ResolveRecursive(
-            PackageInfo package,
-            TryResolve resolver,
+        private void Visit(
+            PackageInfo p,
+            Dictionary<string, PackageInfo> map,
             List<PackageInfo> resolved,
             HashSet<string> visited,
             HashSet<string> visiting)
         {
-            if (visited.Contains(package.name)) return;
+            if (visited.Contains(p.name)) return;
+            if (visiting.Contains(p.name))
+                throw new InvalidOperationException($"Circular dependency detected at '{p.name}'");
 
-            if (visiting.Contains(package.name))
-                throw new InvalidOperationException($"Circular dependency detected involving {package.name}");
+            visiting.Add(p.name);
 
-            visiting.Add(package.name);
-
-            if (package.dependencies != null)
+            if (p.dependencies != null)
             {
-                foreach (var depName in package.dependencies)
+                foreach (var depName in p.dependencies)
                 {
-                    if (string.IsNullOrEmpty(depName)) continue;
-                    if (depName.StartsWith("com.unity.")) continue; // Unity built-ins
+                    // Unity built-ins are handled by UPM directly; keep them in order but no lookup error if not in registry
+                    if (depName.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
+                        continue;
 
-                    if (resolver(depName, out var depPackage))
-                        ResolveRecursive(depPackage, resolver, resolved, visited, visiting);
+                    if (map.TryGetValue(depName, out var dep))
+                        Visit(dep, map, resolved, visited, visiting);
                     else
-                        Debug.LogWarning($"[NUPM] Dependency '{depName}' not found in known sources; will skip auto-install.");
+                        Debug.LogWarning($"[NUPM] Dependency '{depName}' not found in registry");
                 }
             }
 
-            visiting.Remove(package.name);
-            visited.Add(package.name);
-            resolved.Add(package);
+            visiting.Remove(p.name);
+            visited.Add(p.name);
+            resolved.Add(p);
         }
     }
 }

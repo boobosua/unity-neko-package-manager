@@ -1,5 +1,6 @@
 #if UNITY_EDITOR
 using System;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
@@ -8,54 +9,66 @@ using UnityEngine;
 
 namespace NUPM
 {
-    public static class PackageInstaller
+    internal static class PackageInstaller
     {
-        public static async Task InstallPackageAsync(PackageInfo package)
+        private static async Task WaitFor(Request request, string opName, int timeoutMs = 120000)
         {
-            Debug.Log($"[NUPM] Installing {package.name}...");
-            AddRequest request;
-            if (!string.IsNullOrEmpty(package.name) && package.name.StartsWith("com.unity."))
-            {
-                request = Client.Add(package.name);
-            }
-            else
-            {
-                request = Client.Add(package.gitUrl);
-            }
-
-            float t = 0f;
+            var sw = Stopwatch.StartNew();
             while (!request.IsCompleted)
             {
-                t = Mathf.Repeat(t + 0.05f, 1f);
-                EditorUtility.DisplayProgressBar("Installing", $"Installing {package.displayName}…", t);
-                await Task.Delay(100);
+                await Task.Delay(50);
+                if (sw.ElapsedMilliseconds > timeoutMs)
+                    throw new TimeoutException($"{opName} timed out after {timeoutMs / 1000}s.");
             }
-            EditorUtility.ClearProgressBar();
-
             if (request.Status == StatusCode.Failure)
-                throw new Exception($"Failed to install {package.name}: {request.Error.message}");
+                throw new Exception($"{opName} failed: {request.Error?.message}");
+        }
 
-            Debug.Log($"[NUPM] Successfully installed {package.name}");
+        public static async Task InstallPackageAsync(PackageInfo package)
+        {
+            if (package == null) throw new ArgumentNullException(nameof(package));
+            EditorUtility.DisplayProgressBar("Installing", $"Installing {package.displayName}…", 0.5f);
+            try
+            {
+                Request req;
+                if (string.IsNullOrEmpty(package.gitUrl) && package.name.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
+                {
+                    req = Client.Add(package.name);
+                }
+                else
+                {
+                    if (string.IsNullOrEmpty(package.gitUrl))
+                        throw new ArgumentException($"No gitUrl for {package.name}");
+                    var id = package.gitUrl.StartsWith("git+", StringComparison.OrdinalIgnoreCase)
+                        ? package.gitUrl : "git+" + package.gitUrl;
+                    req = Client.Add(id);
+                }
+
+                await WaitFor(req, $"Install {package.name}");
+
+#if UNITY_2020_2_OR_NEWER
+                Client.Resolve(); // no assignment, just call
+#endif
+            }
+            finally { EditorUtility.ClearProgressBar(); }
         }
 
         public static async Task UninstallPackageAsync(PackageInfo package)
         {
-            Debug.Log($"[NUPM] Uninstalling {package.name}...");
-            var request = Client.Remove(package.name);
+            if (package == null) throw new ArgumentNullException(nameof(package));
+            if (string.IsNullOrEmpty(package.name)) throw new ArgumentException("Package name is empty", nameof(package));
 
-            float t = 0f;
-            while (!request.IsCompleted)
+            EditorUtility.DisplayProgressBar("Uninstalling", $"Removing {package.displayName}…", 0.5f);
+            try
             {
-                t = Mathf.Repeat(t + 0.05f, 1f);
-                EditorUtility.DisplayProgressBar("Uninstalling", $"Removing {package.displayName}…", t);
-                await Task.Delay(100);
+                var remove = Client.Remove(package.name);
+                await WaitFor(remove, $"Uninstall {package.name}");
+
+#if UNITY_2020_2_OR_NEWER
+                Client.Resolve();
+#endif
             }
-            EditorUtility.ClearProgressBar();
-
-            if (request.Status == StatusCode.Failure)
-                throw new Exception($"Failed to uninstall {package.name}: {request.Error.message}");
-
-            Debug.Log($"[NUPM] Successfully uninstalled {package.name}");
+            finally { EditorUtility.ClearProgressBar(); }
         }
     }
 }

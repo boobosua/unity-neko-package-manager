@@ -6,9 +6,12 @@ using UnityEditor.PackageManager.Requests;
 
 namespace NUPM
 {
-    public static class InstalledDatabase
+    /// <summary>
+    /// Snapshot of currently installed packages (direct + indirect) from UPM.
+    /// </summary>
+    internal static class InstalledDatabase
     {
-        public class Installed
+        internal class Installed
         {
             public string name;
             public string displayName;
@@ -20,7 +23,7 @@ namespace NUPM
         public static async Task<Dictionary<string, Installed>> SnapshotAsync()
         {
             var dict = new Dictionary<string, Installed>();
-            ListRequest req = Client.List(true); // include indirect
+            ListRequest req = Client.List(true);
             while (!req.IsCompleted) await Task.Delay(50);
 
             if (req.Status == StatusCode.Success && req.Result != null)
@@ -32,7 +35,7 @@ namespace NUPM
                         name = p.name,
                         displayName = string.IsNullOrEmpty(p.displayName) ? p.name : p.displayName,
                         version = p.version,
-                        source = p.source.ToString().ToLowerInvariant(),
+                        source = p.source.ToString(),
                         gitUrl = ExtractGitUrlFromPackageId(p.packageId)
                     };
                 }
@@ -44,8 +47,7 @@ namespace NUPM
         {
             if (string.IsNullOrEmpty(packageId)) return null;
             var idx = packageId.IndexOf("git+");
-            if (idx >= 0) return packageId.Substring(idx + 4);
-            return null;
+            return idx >= 0 ? packageId.Substring(idx + 4) : null;
         }
     }
 }
