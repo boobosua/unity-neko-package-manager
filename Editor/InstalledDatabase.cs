@@ -8,6 +8,7 @@ namespace NUPM
 {
     /// <summary>
     /// Snapshot of currently installed packages (direct + indirect) from UPM.
+    /// Now captures best-effort git hash from packages-lock.json.
     /// </summary>
     internal static class InstalledDatabase
     {
@@ -18,11 +19,16 @@ namespace NUPM
             public string version;
             public string source;
             public string gitUrl;
+            public string gitHash; // NEW
         }
 
         public static async Task<Dictionary<string, Installed>> SnapshotAsync()
         {
-            var dict = new Dictionary<string, Installed>();
+            var dict = new Dictionary<string, Installed>(System.StringComparer.OrdinalIgnoreCase);
+
+            // read lock to map name -> git hash
+            var hashMap = PackageManifestHelper.TryReadPackagesLockGitHashMap();
+
             ListRequest req = Client.List(true);
             while (!req.IsCompleted) await Task.Delay(50);
 
@@ -30,14 +36,19 @@ namespace NUPM
             {
                 foreach (var p in req.Result)
                 {
-                    dict[p.name] = new Installed
+                    var inst = new Installed
                     {
                         name = p.name,
                         displayName = string.IsNullOrEmpty(p.displayName) ? p.name : p.displayName,
                         version = p.version,
                         source = p.source.ToString(),
-                        gitUrl = ExtractGitUrlFromPackageId(p.packageId)
+                        gitUrl = ExtractGitUrlFromPackageId(p.packageId),
+                        gitHash = null
                     };
+                    if (hashMap != null && hashMap.TryGetValue(p.name, out var h))
+                        inst.gitHash = h;
+
+                    dict[p.name] = inst;
                 }
             }
             return dict;

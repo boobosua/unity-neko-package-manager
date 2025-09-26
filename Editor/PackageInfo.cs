@@ -14,6 +14,9 @@ namespace NUPM
         public string gitUrl;
         public List<string> dependencies;
 
+        // NEW: latest remote commit SHA for this Git package (HEAD of main/master)
+        public string latestCommitSha;
+
         public PackageInfo()
         {
             name = "";
@@ -22,6 +25,7 @@ namespace NUPM
             description = "";
             gitUrl = "";
             dependencies = new List<string>();
+            latestCommitSha = null;
         }
 
         public PackageInfo(string name, string displayName, string version, string description, string gitUrl, params string[] deps)
@@ -37,6 +41,7 @@ namespace NUPM
                 foreach (var d in deps)
                     if (!string.IsNullOrEmpty(d)) this.dependencies.Add(d);
             }
+            this.latestCommitSha = null;
         }
 
         public override string ToString() => $"{displayName} ({name}) v{version}";

@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
-using UnityEngine;
 
 namespace NUPM
 {
@@ -31,26 +30,47 @@ namespace NUPM
             try
             {
                 Request req;
-                if (string.IsNullOrEmpty(package.gitUrl) && package.name.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
+
+                // Install-by-name (Unity registry)
+                if (string.IsNullOrEmpty(package.gitUrl) &&
+                    package.name.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
                 {
                     req = Client.Add(package.name);
-                }
-                else
-                {
-                    if (string.IsNullOrEmpty(package.gitUrl))
-                        throw new ArgumentException($"No gitUrl for {package.name}");
-                    var id = package.gitUrl.StartsWith("git+", StringComparison.OrdinalIgnoreCase)
-                        ? package.gitUrl : "git+" + package.gitUrl;
-                    req = Client.Add(id);
-                }
-
-                await WaitFor(req, $"Install {package.name}");
-
+                    await WaitFor(req, $"Install {package.name}");
 #if UNITY_2020_2_OR_NEWER
-                Client.Resolve(); // no assignment, just call
+                    Client.Resolve();
+#endif
+                    return;
+                }
+
+                // Git install (latest HEAD unless URL pins tag/sha)
+                if (string.IsNullOrEmpty(package.gitUrl))
+                    throw new ArgumentException($"No gitUrl for {package.name}");
+                var id = package.gitUrl.StartsWith("git+", StringComparison.OrdinalIgnoreCase)
+                    ? package.gitUrl
+                    : "git+" + package.gitUrl;
+
+                req = Client.Add(id);
+                await WaitFor(req, $"Install {package.name}");
+#if UNITY_2020_2_OR_NEWER
+                Client.Resolve();
 #endif
             }
-            finally { EditorUtility.ClearProgressBar(); }
+            catch (Exception ex)
+            {
+                var msg = ex.Message ?? string.Empty;
+                if (msg.IndexOf("Expected a 'SemVer' compatible value", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    msg +=
+                        "\n\nHint: One of the package's own dependencies in its package.json uses a Git URL as the version.\n" +
+                        "UPM requires a SemVer there (e.g., \"1.9.4\"). Let NUPM pre-install Git deps in the project manifest.";
+                }
+                throw new Exception(msg, ex);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
         }
 
         public static async Task UninstallPackageAsync(PackageInfo package)
@@ -63,12 +83,14 @@ namespace NUPM
             {
                 var remove = Client.Remove(package.name);
                 await WaitFor(remove, $"Uninstall {package.name}");
-
 #if UNITY_2020_2_OR_NEWER
                 Client.Resolve();
 #endif
             }
-            finally { EditorUtility.ClearProgressBar(); }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
         }
     }
 }

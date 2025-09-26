@@ -3,12 +3,14 @@ using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using UnityEngine;
 using UnityEngine.Networking;
 
 namespace NUPM
 {
     /// <summary>
     /// Fetches package.json metadata from a GitHub repo URL (supports optional '#path=...').
+    /// Also fetches the latest HEAD commit sha from main/master.
     /// </summary>
     internal static class GitMetadataFetcher
     {
@@ -33,14 +35,24 @@ namespace NUPM
             var candidates = new List<string> { string.IsNullOrEmpty(path) ? "package.json" : $"{path.TrimEnd('/')}/package.json" };
             var branches = new[] { "main", "master" };
 
+            string latestSha = null;
+
             foreach (var br in branches)
             {
+                // Try to get latest HEAD commit for this branch (best-effort)
+                if (latestSha == null)
+                    latestSha = await TryFetchGithubHeadSha(owner, repo, br);
+
                 foreach (var rel in candidates)
                 {
                     var raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{br}/{rel}";
                     var json = await TryDownloadText(raw);
                     if (!string.IsNullOrEmpty(json))
-                        return ParsePackageJson(json, gitUrl);
+                    {
+                        var pi = ParsePackageJson(json, gitUrl);
+                        pi.latestCommitSha = latestSha;
+                        return pi;
+                    }
                 }
             }
 
@@ -57,17 +69,46 @@ namespace NUPM
 
         private static async Task<string> TryDownloadText(string url)
         {
-            using var req = UnityWebRequest.Get(url);
-            req.timeout = 12;
-            var op = req.SendWebRequest();
-            while (!op.isDone) await Task.Yield();
+            using (var req = UnityWebRequest.Get(url))
+            {
+                req.timeout = 12;
+                var op = req.SendWebRequest();
+                while (!op.isDone) await Task.Yield();
 
 #if UNITY_2020_2_OR_NEWER
-            if (req.result != UnityWebRequest.Result.Success) return null;
+                if (req.result != UnityWebRequest.Result.Success) return null;
 #else
-            if (req.isHttpError || req.isNetworkError) return null;
+                if (req.isHttpError || req.isNetworkError) return null;
 #endif
-            return req.downloadHandler.text;
+                return req.downloadHandler.text;
+            }
+        }
+
+        // NEW: lightweight GitHub HEAD SHA fetch (no auth; keep usage light)
+        private static async Task<string> TryFetchGithubHeadSha(string owner, string repo, string branch)
+        {
+            try
+            {
+                string url = $"https://api.github.com/repos/{owner}/{repo}/commits?sha={branch}&per_page=1";
+                using (var req = UnityWebRequest.Get(url))
+                {
+                    req.timeout = 8;
+                    req.SetRequestHeader("User-Agent", "NUPM"); // GitHub requires a UA
+                    var op = req.SendWebRequest();
+                    while (!op.isDone) await Task.Yield();
+
+#if UNITY_2020_2_OR_NEWER
+                    if (req.result != UnityWebRequest.Result.Success) return null;
+#else
+                    if (req.isHttpError || req.isNetworkError) return null;
+#endif
+                    var json = req.downloadHandler.text;
+                    var m = Regex.Match(json, "\"sha\"\\s*:\\s*\"([0-9a-fA-F]{40})\"");
+                    if (m.Success) return m.Groups[1].Value;
+                }
+            }
+            catch { /* best-effort */ }
+            return null;
         }
 
         private static PackageInfo ParsePackageJson(string json, string gitUrl)
@@ -86,7 +127,8 @@ namespace NUPM
                 version = string.IsNullOrEmpty(version) ? "0.0.0" : version,
                 description = description ?? "",
                 gitUrl = gitUrl,
-                dependencies = deps
+                dependencies = deps,
+                latestCommitSha = null // set by caller when known
             };
         }
 

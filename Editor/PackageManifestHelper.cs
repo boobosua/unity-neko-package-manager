@@ -2,7 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Threading.Tasks;
 using UnityEngine;
 
 namespace NUPM
@@ -18,7 +17,7 @@ namespace NUPM
         private static readonly string ManifestPath = "Packages/manifest.json";
         private static readonly string LockPath = "Packages/packages-lock.json";
 
-        public static async Task<PackageManifest> ReadManifestAsync()
+        public static async System.Threading.Tasks.Task<PackageManifest> ReadManifestAsync()
         {
             try
             {
@@ -48,16 +47,16 @@ namespace NUPM
             }
         }
 
-        public static async Task<bool> IsPackageInManifestAsync(string packageName)
+        public static async System.Threading.Tasks.Task<bool> IsPackageInManifestAsync(string packageName)
         {
             var manifest = await ReadManifestAsync();
             return manifest.dependencies.ContainsKey(packageName);
         }
 
+        // Existing: version map (best-effort)
         public static Dictionary<string, string> TryReadPackagesLockVersionMap()
         {
-            // Best-effort: parse { "dependencies": { "com.x": { "version": "1.2.3", ... } } }
-            var map = new Dictionary<string, string>();
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 if (!File.Exists(LockPath)) return map;
@@ -69,7 +68,6 @@ namespace NUPM
                 if (braceStart < 0 || braceEnd < 0) return map;
 
                 var chunk = json.Substring(braceStart + 1, braceEnd - braceStart - 1);
-                // crude parse per package block
                 var lines = chunk.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                 string current = null;
                 foreach (var l in lines)
@@ -79,9 +77,7 @@ namespace NUPM
                     {
                         var nameEnd = line.IndexOf('"', 1);
                         if (nameEnd > 1)
-                        {
                             current = line.Substring(1, nameEnd - 1);
-                        }
                     }
                     if (current != null && line.Contains("\"version\""))
                     {
@@ -95,7 +91,51 @@ namespace NUPM
                     }
                 }
             }
-            catch (Exception) { /* best-effort */ }
+            catch { /* best-effort */ }
+
+            return map;
+        }
+
+        // NEW: best-effort git hash map from packages-lock.json
+        public static Dictionary<string, string> TryReadPackagesLockGitHashMap()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(LockPath)) return map;
+                var json = File.ReadAllText(LockPath);
+                var depsIdx = json.IndexOf("\"dependencies\"");
+                if (depsIdx < 0) return map;
+                var braceStart = json.IndexOf('{', depsIdx);
+                var braceEnd = FindMatchingBrace(json, braceStart);
+                if (braceStart < 0 || braceEnd < 0) return map;
+
+                var chunk = json.Substring(braceStart + 1, braceEnd - braceStart - 1);
+                var lines = chunk.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                string current = null;
+                foreach (var l in lines)
+                {
+                    var line = l.Trim();
+                    if (line.StartsWith("\""))
+                    {
+                        var nameEnd = line.IndexOf('"', 1);
+                        if (nameEnd > 1)
+                            current = line.Substring(1, nameEnd - 1);
+                    }
+                    if (current != null && line.IndexOf("\"hash\"", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        var s = line.IndexOf(':');
+                        if (s > 0)
+                        {
+                            var v = line.Substring(s + 1).Trim().Trim(',').Trim('"');
+                            if (!string.IsNullOrEmpty(v))
+                                map[current] = v;
+                            current = null;
+                        }
+                    }
+                }
+            }
+            catch { /* best-effort */ }
 
             return map;
         }

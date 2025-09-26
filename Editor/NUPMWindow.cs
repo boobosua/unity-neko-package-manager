@@ -12,7 +12,6 @@ namespace NUPM
     {
         private enum Tab { Browse, Installed }
 
-        // Simple row holder (avoid tuples to be conservative with C# settings)
         private sealed class InstalledRow
         {
             public InstalledDatabase.Installed Inst;
@@ -28,24 +27,19 @@ namespace NUPM
         private Dictionary<string, InstalledDatabase.Installed> _installed =
             new Dictionary<string, InstalledDatabase.Installed>(StringComparer.OrdinalIgnoreCase);
 
-        private bool _init;             // set after first init pass
-        private bool _loading;          // true while first init is in progress
-        private bool _scheduledInit;    // avoid multiple delayCall in OnEnable
+        private bool _init;             // first init done
+        private bool _loading;          // init in progress
+        private bool _scheduledInit;    // avoid double delayCall
 
-        // Single-flight refresh (prevents double refresh)
-        private Task _refreshTask;      // current in-flight refresh task (if any)
-
-        // Debounced/delayed refresh request
+        private Task _refreshTask;      // single-flight refresh
         private bool _delayedRefreshArmed;
         private double _delayedRefreshUntil;
 
-        // Bootstrap auto-retry on empty/timeout
         private bool _bootstrapRetryHooked;
         private int _bootstrapRetriesLeft = 5;
         private double _nextRetryAt;
 
-        // Timeout + user hint
-        private const int RefreshTimeoutMs = 10000; // 10s cap for catalog refresh
+        private const int RefreshTimeoutMs = 10000;
         private bool _lastRefreshTimedOut;
 
         [MenuItem("Window/NUPM")]
@@ -71,12 +65,11 @@ namespace NUPM
         {
             UnityEditor.PackageManager.Events.registeredPackages -= OnRegisteredPackages;
             EditorApplication.update -= OnEditorUpdate;
-            StopBootstrapRetries();
+            _bootstrapRetryHooked = false;
         }
 
         private async void OnDelayCallInit()
         {
-            // Window may have been closed before delayCall fires
             if (this == null) return;
             await InitializeAsync();
             TryBeginBootstrapRetries();
@@ -87,7 +80,7 @@ namespace NUPM
             if (_init || _loading) return;
             _loading = true; Repaint();
 
-            await RefreshAsyncCoalesced(); // single-flight guarded
+            await RefreshAsyncCoalesced();
 
             _init = true;
             _loading = false; Repaint();
@@ -95,7 +88,6 @@ namespace NUPM
 
         private void OnRegisteredPackages(UnityEditor.PackageManager.PackageRegistrationEventArgs args)
         {
-            // Debounce UPM events (they can fire in bursts)
             RequestRefresh(0.2);
         }
 
@@ -107,34 +99,31 @@ namespace NUPM
 
         private void OnEditorUpdate()
         {
-            // Handle delayed/debounced refresh requests
             if (_delayedRefreshArmed && EditorApplication.timeSinceStartup >= _delayedRefreshUntil)
             {
                 _delayedRefreshArmed = false;
-                _ = RefreshAsyncCoalesced(); // fire single-flight refresh
+                _ = RefreshAsyncCoalesced();
             }
 
-            // Bootstrap retry pump
             if (_bootstrapRetryHooked && EditorApplication.timeSinceStartup >= _nextRetryAt)
             {
                 if (_catalog != null && _catalog.Count > 0)
                 {
-                    StopBootstrapRetries();
+                    _bootstrapRetryHooked = false;
                 }
                 else if (_bootstrapRetriesLeft > 0)
                 {
                     _bootstrapRetriesLeft--;
                     _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
-                    _ = RefreshAsyncCoalesced(); // coalesced if one is running
+                    _ = RefreshAsyncCoalesced();
                 }
                 else
                 {
-                    StopBootstrapRetries();
+                    _bootstrapRetryHooked = false;
                 }
             }
         }
 
-        // Public-ish trigger points should call this, not RefreshAsync directly
         private void RequestRefresh(double delaySeconds)
         {
             if (delaySeconds <= 0.0)
@@ -146,7 +135,6 @@ namespace NUPM
             _delayedRefreshUntil = EditorApplication.timeSinceStartup + delaySeconds;
         }
 
-        // Ensures only ONE refresh runs at a time. Subsequent calls reuse the same task.
         private Task RefreshAsyncCoalesced()
         {
             if (_refreshTask != null && !_refreshTask.IsCompleted)
@@ -160,7 +148,6 @@ namespace NUPM
         {
             try
             {
-                // Run both with an overall 10s timeout
                 Task<Dictionary<string, InstalledDatabase.Installed>> installedTask = InstalledDatabase.SnapshotAsync();
                 Task<List<PackageInfo>> catalogTask = PackageRegistry.RefreshAsync();
 
@@ -170,17 +157,16 @@ namespace NUPM
                 {
                     _lastRefreshTimedOut = true;
                     Debug.LogWarning("[NUPM] Refresh timed out after 10s (network/UPM may be unavailable).");
-                    return; // keep previous state; bootstrap retries will try again
+                    return;
                 }
 
-                // Success: assign results
                 _installed = installedTask.Result ?? new Dictionary<string, InstalledDatabase.Installed>(StringComparer.OrdinalIgnoreCase);
                 _catalog = catalogTask.Result ?? new List<PackageInfo>();
                 _lastRefreshTimedOut = false;
             }
             catch (Exception e)
             {
-                _lastRefreshTimedOut = false; // an actual error, not timeout
+                _lastRefreshTimedOut = false;
                 Debug.LogWarning("[NUPM] Refresh failed: " + e.Message);
             }
             finally
@@ -205,28 +191,18 @@ namespace NUPM
             else DrawInstalled();
             GUILayout.EndScrollView();
 
-            // If UI drew but catalog is empty, ensure bootstrapping
             TryBeginBootstrapRetries();
         }
 
-        // -------- Bootstrap retry engine --------
-
         private void TryBeginBootstrapRetries()
         {
-            if (_catalog != null && _catalog.Count > 0) { StopBootstrapRetries(); return; }
+            if (_catalog != null && _catalog.Count > 0) { _bootstrapRetryHooked = false; return; }
             if (_bootstrapRetryHooked) return;
 
             _bootstrapRetryHooked = true;
             _bootstrapRetriesLeft = 5;
             _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
         }
-
-        private void StopBootstrapRetries()
-        {
-            _bootstrapRetryHooked = false;
-        }
-
-        // -------- UI --------
 
         private void DrawToolbar()
         {
@@ -241,7 +217,7 @@ namespace NUPM
 
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("Refresh", EditorStyles.toolbarButton, GUILayout.Width(80)))
-                    RequestRefresh(0.0); // coalesced
+                    RequestRefresh(0.0);
             }
         }
 
@@ -259,7 +235,6 @@ namespace NUPM
         private void DrawBrowse()
         {
             List<PackageInfo> list = new List<PackageInfo>(Filter(_catalog));
-
             if (list.Count == 0)
             {
                 string msg = _lastRefreshTimedOut
@@ -292,14 +267,12 @@ namespace NUPM
             {
                 InstalledDatabase.Installed i = installedList[idx];
                 PackageInfo remote = null;
-                if (i != null && i.name != null && PackageRegistry.TryGetByName(i.name, out remote)) { /* remote set */ }
+                if (i != null && i.name != null && PackageRegistry.TryGetByName(i.name, out remote)) { }
 
-                bool hasUpdate = (remote != null) && IsNewer(remote.version, i.version);
-                InstalledRow row = new InstalledRow { Inst = i, Remote = remote, HasUpdate = hasUpdate };
-                rows.Add(row);
+                bool hasUpdate = HasUpdate(remote, i);
+                rows.Add(new InstalledRow { Inst = i, Remote = remote, HasUpdate = hasUpdate });
             }
 
-            // Order: updates first, then by display name
             rows.Sort((a, b) =>
             {
                 int byUpdate = b.HasUpdate.CompareTo(a.HasUpdate);
@@ -309,7 +282,6 @@ namespace NUPM
                 return string.Compare(an, bn, StringComparison.OrdinalIgnoreCase);
             });
 
-            // Filter by search
             string s = string.IsNullOrEmpty(_search) ? null : _search.ToLowerInvariant();
             foreach (InstalledRow row in rows)
             {
@@ -329,7 +301,7 @@ namespace NUPM
             InstalledDatabase.Installed inst;
             if (_installed == null || !_installed.TryGetValue(pkg.name, out inst)) inst = null;
 
-            bool hasUpdate = showUpdateBadge && inst != null && IsNewer(pkg.version, inst.version);
+            bool hasUpdate = showUpdateBadge && HasUpdate(pkg, inst);
 
             using (new GUILayout.VerticalScope("box"))
             {
@@ -384,7 +356,11 @@ namespace NUPM
 
                 GUILayout.Label("Name: " + inst.name, EditorStyles.miniLabel);
                 GUILayout.Label("Installed: " + inst.version + " [" + inst.source + "]", EditorStyles.miniLabel);
+                if (!string.IsNullOrEmpty(inst.gitHash))
+                    GUILayout.Label("Commit:   " + inst.gitHash, EditorStyles.miniLabel);
                 if (remote != null) GUILayout.Label("Latest:    " + remote.version, EditorStyles.miniLabel);
+                if (remote != null && !string.IsNullOrEmpty(remote.latestCommitSha))
+                    GUILayout.Label("Latest SHA: " + remote.latestCommitSha, EditorStyles.miniLabel);
 
                 using (new GUILayout.HorizontalScope())
                 {
@@ -392,7 +368,7 @@ namespace NUPM
                     if (hasUpdate && remote != null)
                     {
                         if (GUILayout.Button("Update", GUILayout.Width(90)))
-                            _ = UpdatePackageAsync(remote);
+                            _ = UpdatePackageAsync(remote); // re-Add pulls latest HEAD
                     }
                     if (GUILayout.Button("Uninstall", GUILayout.Width(90)))
                         _ = UninstallPackageAsync(new PackageInfo { name = inst.name, displayName = inst.displayName });
@@ -400,7 +376,26 @@ namespace NUPM
             }
         }
 
-        private static bool IsNewer(string remote, string installed)
+        // ----- Update detection helpers (version OR git commit change) -----
+        private static bool HasUpdate(PackageInfo remote, InstalledDatabase.Installed inst)
+        {
+            if (remote == null || inst == null) return false;
+
+            if (IsVersionNewer(remote.version, inst.version))
+                return true;
+
+            bool isGit = !string.IsNullOrEmpty(remote.gitUrl) || !string.IsNullOrEmpty(inst.gitUrl);
+            if (isGit)
+            {
+                if (!string.IsNullOrEmpty(remote.latestCommitSha) &&
+                    !string.IsNullOrEmpty(inst.gitHash) &&
+                    !string.Equals(remote.latestCommitSha, inst.gitHash, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsVersionNewer(string remote, string installed)
         {
             Version rv = SafeVer(remote);
             Version iv = SafeVer(installed);
@@ -420,6 +415,7 @@ namespace NUPM
         {
             try
             {
+                // Your existing flow: resolve and prompt using EditorUtility.DisplayDialog
                 DependencyResolver resolver = new DependencyResolver();
                 List<PackageInfo> order = resolver.ResolveDependencies(root, _catalog);
 
@@ -452,7 +448,7 @@ namespace NUPM
                             "Installing " + p.displayName + " (" + (i + 1) + "/" + toInstall.Count + ")…",
                             (float)(i + 1) / (float)toInstall.Count);
 
-                        await PackageInstaller.InstallPackageAsync(p);
+                        await PackageInstaller.InstallPackageAsync(p); // Git install pulls latest HEAD
                     }
                     EditorUtility.ClearProgressBar();
                 }
@@ -473,7 +469,7 @@ namespace NUPM
             try
             {
                 EditorUtility.DisplayProgressBar("Updating", "Updating " + latest.displayName + "…", 0.5f);
-                await PackageInstaller.InstallPackageAsync(latest);
+                await PackageInstaller.InstallPackageAsync(latest); // re-Add pulls latest HEAD
                 EditorUtility.ClearProgressBar();
                 RequestRefresh(0.1);
                 EditorUtility.DisplayDialog("Success", latest.displayName + " updated!", "OK");
