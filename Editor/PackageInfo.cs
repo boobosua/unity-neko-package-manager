@@ -14,7 +14,7 @@ namespace NUPM
         public string gitUrl;
         public List<string> dependencies;
 
-        // NEW: latest remote commit SHA for this Git package (HEAD of main/master)
+        // Remote HEAD commit SHA (for Git packages). Lets us show Update even if SemVer didn't bump.
         public string latestCommitSha;
 
         public PackageInfo()
@@ -44,7 +44,7 @@ namespace NUPM
             this.latestCommitSha = null;
         }
 
-        public override string ToString() => $"{displayName} ({name}) v{version}";
+        public override string ToString() { return displayName + " (" + name + ") v" + version; }
     }
 }
 #endif

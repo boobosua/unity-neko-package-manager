@@ -8,6 +8,13 @@ using UnityEngine;
 
 namespace NUPM
 {
+    /// <summary>
+    /// Unity 2021+ / Unity 6 friendly editor window:
+    /// - Single-flight refresh + 10s timeout
+    /// - Dependencies include Unity-by-name (e.g., Newtonsoft) by merging live package.json
+    /// - Update badge if SemVer OR Git HEAD changed
+    /// - Guards against re-entrant refresh spam during install chains
+    /// </summary>
     public class NUPMWindow : EditorWindow
     {
         private enum Tab { Browse, Installed }
@@ -27,11 +34,11 @@ namespace NUPM
         private Dictionary<string, InstalledDatabase.Installed> _installed =
             new Dictionary<string, InstalledDatabase.Installed>(StringComparer.OrdinalIgnoreCase);
 
-        private bool _init;             // first init done
-        private bool _loading;          // init in progress
-        private bool _scheduledInit;    // avoid double delayCall
+        private bool _init;
+        private bool _loading;
+        private bool _scheduledInit;
 
-        private Task _refreshTask;      // single-flight refresh
+        private Task _refreshTask;
         private bool _delayedRefreshArmed;
         private double _delayedRefreshUntil;
 
@@ -41,6 +48,8 @@ namespace NUPM
 
         private const int RefreshTimeoutMs = 10000;
         private bool _lastRefreshTimedOut;
+
+        private static bool _installingActive; // suppress package events/refresh while installing
 
         [MenuItem("Window/NUPM")]
         public static void ShowWindow()
@@ -88,6 +97,7 @@ namespace NUPM
 
         private void OnRegisteredPackages(UnityEditor.PackageManager.PackageRegistrationEventArgs args)
         {
+            if (_installingActive) return; // avoid double-refresh storm during install chain
             RequestRefresh(0.2);
         }
 
@@ -223,7 +233,7 @@ namespace NUPM
 
         private IEnumerable<PackageInfo> Filter(IEnumerable<PackageInfo> src)
         {
-            if (src == null) return Enumerable.Empty<PackageInfo>();
+            if (src == null) return new List<PackageInfo>();
             if (string.IsNullOrEmpty(_search)) return src;
             string s = _search.ToLowerInvariant();
             return src.Where(p =>
@@ -267,28 +277,32 @@ namespace NUPM
             {
                 InstalledDatabase.Installed i = installedList[idx];
                 PackageInfo remote = null;
-                if (i != null && i.name != null && PackageRegistry.TryGetByName(i.name, out remote)) { }
+                if (i != null && i.name != null)
+                    PackageRegistry.TryGetByName(i.name, out remote);
 
                 bool hasUpdate = HasUpdate(remote, i);
-                rows.Add(new InstalledRow { Inst = i, Remote = remote, HasUpdate = hasUpdate });
+                InstalledRow row = new InstalledRow();
+                row.Inst = i; row.Remote = remote; row.HasUpdate = hasUpdate;
+                rows.Add(row);
             }
 
-            rows.Sort((a, b) =>
+            rows.Sort(delegate (InstalledRow a, InstalledRow b)
             {
                 int byUpdate = b.HasUpdate.CompareTo(a.HasUpdate);
                 if (byUpdate != 0) return byUpdate;
-                string an = (a.Inst != null && a.Inst.displayName != null) ? a.Inst.displayName : string.Empty;
-                string bn = (b.Inst != null && b.Inst.displayName != null) ? b.Inst.displayName : string.Empty;
+                string an = (a.Inst != null && a.Inst.displayName != null) ? a.Inst.displayName : "";
+                string bn = (b.Inst != null && b.Inst.displayName != null) ? b.Inst.displayName : "";
                 return string.Compare(an, bn, StringComparison.OrdinalIgnoreCase);
             });
 
             string s = string.IsNullOrEmpty(_search) ? null : _search.ToLowerInvariant();
-            foreach (InstalledRow row in rows)
+            for (int r = 0; r < rows.Count; r++)
             {
+                InstalledRow row = rows[r];
                 if (s != null)
                 {
-                    string n = (row.Inst != null && row.Inst.name != null) ? row.Inst.name.ToLowerInvariant() : string.Empty;
-                    string dn = (row.Inst != null && row.Inst.displayName != null) ? row.Inst.displayName.ToLowerInvariant() : string.Empty;
+                    string n = (row.Inst != null && row.Inst.name != null) ? row.Inst.name.ToLowerInvariant() : "";
+                    string dn = (row.Inst != null && row.Inst.displayName != null) ? row.Inst.displayName.ToLowerInvariant() : "";
                     if (!(n.Contains(s) || dn.Contains(s))) continue;
                 }
                 DrawInstalledCard(row.Inst, row.Remote, row.HasUpdate);
@@ -307,7 +321,8 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    GUIStyle title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
+                    GUIStyle title = new GUIStyle(EditorStyles.label);
+                    title.fontSize = 16; title.fontStyle = FontStyle.Bold;
                     GUILayout.Label(pkg.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
@@ -348,7 +363,8 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    GUIStyle title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
+                    GUIStyle title = new GUIStyle(EditorStyles.label);
+                    title.fontSize = 16; title.fontStyle = FontStyle.Bold;
                     GUILayout.Label(inst.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
@@ -368,7 +384,7 @@ namespace NUPM
                     if (hasUpdate && remote != null)
                     {
                         if (GUILayout.Button("Update", GUILayout.Width(90)))
-                            _ = UpdatePackageAsync(remote); // re-Add pulls latest HEAD
+                            _ = UpdatePackageAsync(remote);
                     }
                     if (GUILayout.Button("Uninstall", GUILayout.Width(90)))
                         _ = UninstallPackageAsync(new PackageInfo { name = inst.name, displayName = inst.displayName });
@@ -376,7 +392,7 @@ namespace NUPM
             }
         }
 
-        // ----- Update detection helpers (version OR git commit change) -----
+        // ---- Update detection (SemVer OR Git HEAD changed) ----
         private static bool HasUpdate(PackageInfo remote, InstalledDatabase.Installed inst)
         {
             if (remote == null || inst == null) return false;
@@ -405,55 +421,127 @@ namespace NUPM
         private static Version SafeVer(string s)
         {
             if (string.IsNullOrEmpty(s)) return new Version(0, 0, 0);
-            try { return new Version(s.Split(new[] { '+', '-', ' ' })[0]); }
+            try { return new Version(s.Split(new char[] { '+', '-', ' ' })[0]); }
             catch { return new Version(0, 0, 0); }
         }
 
-        // --------------------- Install / Update / Uninstall ---------------------
+        // ---------------- Install / Update / Uninstall ----------------
 
         private async Task InstallWithDependenciesAsync(PackageInfo root)
         {
             try
             {
-                // Your existing flow: resolve and prompt using EditorUtility.DisplayDialog
+                _installingActive = true;
+
+                // 1) Resolve Git deps (deps-first, includes root)
                 DependencyResolver resolver = new DependencyResolver();
                 List<PackageInfo> order = resolver.ResolveDependencies(root, _catalog);
 
-                List<PackageInfo> toInstall = new List<PackageInfo>();
+                // 2) Merge Unity-by-name deps (e.g., Newtonsoft) from live package.json for root + each git dep
+                HashSet<string> nameDeps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                Action<PackageInfo> collectFrom = delegate (PackageInfo pkg)
+                {
+                    if (pkg == null || pkg.dependencies == null) return;
+                    for (int i = 0; i < pkg.dependencies.Count; i++)
+                    {
+                        string d = pkg.dependencies[i];
+                        if (!string.IsNullOrEmpty(d) && d.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
+                            nameDeps.Add(d);
+                    }
+                };
+
+                collectFrom(root);
+                for (int i = 0; i < order.Count; i++) collectFrom(order[i]);
+
+                // Live fetch and merge (ensures Newtonsoft appears even if cached entry was minimal)
+                async Task MergeLiveDeps(PackageInfo p)
+                {
+                    if (p == null || string.IsNullOrEmpty(p.gitUrl)) return;
+                    try
+                    {
+                        PackageInfo live = await GitMetadataFetcher.FetchAsync(p.gitUrl);
+                        if (live != null && live.dependencies != null)
+                        {
+                            for (int j = 0; j < live.dependencies.Count; j++)
+                            {
+                                string d = live.dependencies[j];
+                                if (!string.IsNullOrEmpty(d) && d.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
+                                    nameDeps.Add(d);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                await MergeLiveDeps(root);
+                for (int i = 0; i < order.Count; i++) await MergeLiveDeps(order[i]);
+
+                // 3) Compute what to install
+                List<PackageInfo> gitToInstall = new List<PackageInfo>();
                 for (int i = 0; i < order.Count; i++)
                 {
                     PackageInfo p = order[i];
                     bool already = (_installed != null) && _installed.ContainsKey(p.name);
-                    if (!already) toInstall.Add(p);
+                    if (!already) gitToInstall.Add(p);
                 }
 
-                if (toInstall.Count > 0)
+                List<string> nameDepsMissing = new List<string>();
+                foreach (string n in nameDeps)
                 {
-                    List<PackageInfo> depOnly = toInstall.Where(p => !string.Equals(p.name, root.name, StringComparison.OrdinalIgnoreCase)).ToList();
-                    if (depOnly.Count > 0)
-                    {
-                        string names = string.Join(", ", depOnly.Select(d => d.displayName).ToArray());
-                        bool proceed = EditorUtility.DisplayDialog(
-                            "Install Dependencies",
-                            "\"" + root.displayName + "\" requires:\n" + names + "\n\nInstall dependencies first?",
-                            "Install All",
-                            "Cancel");
-                        if (!proceed) return;
-                    }
-
-                    for (int i = 0; i < toInstall.Count; i++)
-                    {
-                        PackageInfo p = toInstall[i];
-                        EditorUtility.DisplayProgressBar("Installing",
-                            "Installing " + p.displayName + " (" + (i + 1) + "/" + toInstall.Count + ")…",
-                            (float)(i + 1) / (float)toInstall.Count);
-
-                        await PackageInstaller.InstallPackageAsync(p); // Git install pulls latest HEAD
-                    }
-                    EditorUtility.ClearProgressBar();
+                    if (_installed == null || !_installed.ContainsKey(n))
+                        nameDepsMissing.Add(n);
                 }
 
-                RequestRefresh(0.1);
+                // 4) Confirm (Unity's dialog; selectable text is normal in some OS skins)
+                List<string> displayList = new List<string>();
+                for (int i = 0; i < nameDepsMissing.Count; i++) displayList.Add(nameDepsMissing[i]);
+                for (int i = 0; i < gitToInstall.Count; i++)
+                {
+                    PackageInfo g = gitToInstall[i];
+                    if (!string.Equals(g.name, root.name, StringComparison.OrdinalIgnoreCase))
+                        displayList.Add(g.displayName);
+                }
+
+                if (displayList.Count > 0)
+                {
+                    string names = string.Join(", ", displayList.ToArray());
+                    bool proceed = EditorUtility.DisplayDialog(
+                        "Install Dependencies",
+                        "\"" + root.displayName + "\" requires:\n" + names + "\n\nInstall dependencies first?",
+                        "Install All",
+                        "Cancel");
+                    if (!proceed) { _installingActive = false; return; }
+                }
+
+                int total = nameDepsMissing.Count + gitToInstall.Count;
+                int step = 0;
+
+                // 5) Install name deps first (e.g., Newtonsoft)
+                for (int i = 0; i < nameDepsMissing.Count; i++)
+                {
+                    string n = nameDepsMissing[i];
+                    EditorUtility.DisplayProgressBar("Installing",
+                        "Installing " + n + " (" + (step + 1) + "/" + total + ")…",
+                        (float)(step + 1) / Mathf.Max(1f, (float)total));
+                    step++;
+
+                    PackageInfo pi = new PackageInfo(); pi.name = n; pi.displayName = n; pi.gitUrl = "";
+                    await PackageInstaller.InstallPackageAsync(pi);
+                }
+
+                // 6) Install Git deps (includes root when needed)
+                for (int i = 0; i < gitToInstall.Count; i++)
+                {
+                    PackageInfo p = gitToInstall[i];
+                    EditorUtility.DisplayProgressBar("Installing",
+                        "Installing " + p.displayName + " (" + (step + 1) + "/" + total + ")…",
+                        (float)(step + 1) / Mathf.Max(1f, (float)total));
+                    step++;
+
+                    await PackageInstaller.InstallPackageAsync(p);
+                }
+                EditorUtility.ClearProgressBar();
+
+                RequestRefresh(0.3);
                 EditorUtility.DisplayDialog("Success", root.displayName + " installed successfully!", "OK");
             }
             catch (Exception e)
@@ -462,16 +550,21 @@ namespace NUPM
                 EditorUtility.DisplayDialog("Error", "Installation failed:\n" + e.Message, "OK");
                 Debug.LogError("[NUPM] Install error: " + e);
             }
+            finally
+            {
+                _installingActive = false;
+            }
         }
 
         private async Task UpdatePackageAsync(PackageInfo latest)
         {
             try
             {
+                _installingActive = true;
                 EditorUtility.DisplayProgressBar("Updating", "Updating " + latest.displayName + "…", 0.5f);
                 await PackageInstaller.InstallPackageAsync(latest); // re-Add pulls latest HEAD
                 EditorUtility.ClearProgressBar();
-                RequestRefresh(0.1);
+                RequestRefresh(0.3);
                 EditorUtility.DisplayDialog("Success", latest.displayName + " updated!", "OK");
             }
             catch (Exception e)
@@ -480,12 +573,18 @@ namespace NUPM
                 EditorUtility.DisplayDialog("Error", "Update failed:\n" + e.Message, "OK");
                 Debug.LogError("[NUPM] Update error: " + e);
             }
+            finally
+            {
+                _installingActive = false;
+            }
         }
 
         private async Task UninstallPackageAsync(PackageInfo package)
         {
             try
             {
+                _installingActive = true;
+
                 List<string> installedKeys = (_installed != null) ? new List<string>(_installed.Keys) : new List<string>();
                 HashSet<string> installedCustom = new HashSet<string>(installedKeys, StringComparer.OrdinalIgnoreCase);
 
@@ -502,7 +601,7 @@ namespace NUPM
                         package.displayName + " is required by:\n" + list + "\n\nUninstall dependents first?",
                         "Uninstall Dependents",
                         "Cancel");
-                    if (!alsoUninstall) return;
+                    if (!alsoUninstall) { _installingActive = false; return; }
 
                     for (int i = 0; i < dependents.Count; i++)
                     {
@@ -520,10 +619,10 @@ namespace NUPM
                     "Uninstall Package",
                     "Uninstall " + package.displayName + "?",
                     "Uninstall", "Cancel");
-                if (!proceed) return;
+                if (!proceed) { _installingActive = false; return; }
 
                 await PackageInstaller.UninstallPackageAsync(package);
-                RequestRefresh(0.1);
+                RequestRefresh(0.3);
                 EditorUtility.DisplayDialog("Success", package.displayName + " uninstalled successfully!", "OK");
             }
             catch (Exception e)
@@ -531,6 +630,10 @@ namespace NUPM
                 EditorUtility.ClearProgressBar();
                 EditorUtility.DisplayDialog("Error", "Uninstallation failed:\n" + e.Message, "OK");
                 Debug.LogError("[NUPM] Uninstall error: " + e);
+            }
+            finally
+            {
+                _installingActive = false;
             }
         }
     }

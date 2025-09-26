@@ -9,8 +9,9 @@ using UnityEngine.Networking;
 namespace NUPM
 {
     /// <summary>
-    /// Fetches package.json metadata from a GitHub repo URL (supports optional '#path=...').
-    /// Also fetches the latest HEAD commit sha from main/master.
+    /// Reads package.json (and HEAD sha) from GitHub gitUrl.
+    /// Supports optional '#path=Packages/XXX' fragment.
+    /// Unity 2021+ / Unity 6 safe (uses UnityWebRequest.result).
     /// </summary>
     internal static class GitMetadataFetcher
     {
@@ -23,91 +24,86 @@ namespace NUPM
             if (string.IsNullOrEmpty(gitUrl))
                 throw new ArgumentException("gitUrl is null or empty");
 
-            var m = GithubRepoRx.Match(gitUrl);
+            Match m = GithubRepoRx.Match(gitUrl);
             if (!m.Success)
-                throw new NotSupportedException($"Unsupported git URL: {gitUrl}");
+                throw new NotSupportedException("Unsupported git URL: " + gitUrl);
 
-            var owner = m.Groups["owner"].Value;
-            var repo = m.Groups["repo"].Value;
-            var frag = m.Groups["frag"].Value; // may contain '#path=...'
+            string owner = m.Groups["owner"].Value;
+            string repo = m.Groups["repo"].Value;
+            string frag = m.Groups["frag"].Value;
 
-            var path = ExtractPathFragment(frag);
-            var candidates = new List<string> { string.IsNullOrEmpty(path) ? "package.json" : $"{path.TrimEnd('/')}/package.json" };
-            var branches = new[] { "main", "master" };
+            string path = ExtractPathFragment(frag);
+            List<string> candidates = new List<string>();
+            candidates.Add(string.IsNullOrEmpty(path) ? "package.json" : path.TrimEnd('/') + "/package.json");
 
+            string[] branches = new string[] { "main", "master" };
             string latestSha = null;
 
-            foreach (var br in branches)
+            for (int bi = 0; bi < branches.Length; bi++)
             {
-                // Try to get latest HEAD commit for this branch (best-effort)
+                string br = branches[bi];
+
                 if (latestSha == null)
                     latestSha = await TryFetchGithubHeadSha(owner, repo, br);
 
-                foreach (var rel in candidates)
+                for (int ci = 0; ci < candidates.Count; ci++)
                 {
-                    var raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{br}/{rel}";
-                    var json = await TryDownloadText(raw);
+                    string rel = candidates[ci];
+                    string raw = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + br + "/" + rel;
+                    string json = await TryDownloadText(raw);
                     if (!string.IsNullOrEmpty(json))
                     {
-                        var pi = ParsePackageJson(json, gitUrl);
+                        PackageInfo pi = ParsePackageJson(json, gitUrl);
                         pi.latestCommitSha = latestSha;
                         return pi;
                     }
                 }
             }
 
-            throw new Exception($"package.json not found for {gitUrl} (try appending '#path=Packages/<folder>')");
+            throw new Exception("package.json not found for " + gitUrl + " (try appending '#path=Packages/<folder>')");
         }
 
         private static string ExtractPathFragment(string frag)
         {
             if (string.IsNullOrEmpty(frag)) return null;
-            var idx = frag.IndexOf("#path=", StringComparison.OrdinalIgnoreCase);
+            int idx = frag.IndexOf("#path=", StringComparison.OrdinalIgnoreCase);
             if (idx < 0) return null;
             return frag.Substring(idx + 6).TrimStart('/');
         }
 
         private static async Task<string> TryDownloadText(string url)
         {
-            using (var req = UnityWebRequest.Get(url))
+            using (UnityWebRequest req = UnityWebRequest.Get(url))
             {
                 req.timeout = 12;
                 var op = req.SendWebRequest();
                 while (!op.isDone) await Task.Yield();
 
-#if UNITY_2020_2_OR_NEWER
                 if (req.result != UnityWebRequest.Result.Success) return null;
-#else
-                if (req.isHttpError || req.isNetworkError) return null;
-#endif
                 return req.downloadHandler.text;
             }
         }
 
-        // NEW: lightweight GitHub HEAD SHA fetch (no auth; keep usage light)
+        // Lightweight HEAD commit fetch (no auth) — Unity 2021+ safe.
         private static async Task<string> TryFetchGithubHeadSha(string owner, string repo, string branch)
         {
             try
             {
-                string url = $"https://api.github.com/repos/{owner}/{repo}/commits?sha={branch}&per_page=1";
-                using (var req = UnityWebRequest.Get(url))
+                string url = "https://api.github.com/repos/" + owner + "/" + repo + "/commits?sha=" + branch + "&per_page=1";
+                using (UnityWebRequest req = UnityWebRequest.Get(url))
                 {
                     req.timeout = 8;
-                    req.SetRequestHeader("User-Agent", "NUPM"); // GitHub requires a UA
+                    req.SetRequestHeader("User-Agent", "NUPM");
                     var op = req.SendWebRequest();
                     while (!op.isDone) await Task.Yield();
 
-#if UNITY_2020_2_OR_NEWER
                     if (req.result != UnityWebRequest.Result.Success) return null;
-#else
-                    if (req.isHttpError || req.isNetworkError) return null;
-#endif
-                    var json = req.downloadHandler.text;
-                    var m = Regex.Match(json, "\"sha\"\\s*:\\s*\"([0-9a-fA-F]{40})\"");
+                    string json = req.downloadHandler.text;
+                    Match m = Regex.Match(json, "\"sha\"\\s*:\\s*\"([0-9a-fA-F]{40})\"");
                     if (m.Success) return m.Groups[1].Value;
                 }
             }
-            catch { /* best-effort */ }
+            catch { }
             return null;
         }
 
@@ -117,35 +113,34 @@ namespace NUPM
             string displayName = Extract(json, "\"displayName\"");
             string version = Extract(json, "\"version\"");
             string description = Extract(json, "\"description\"");
-            var deps = ExtractDependencies(json);
+            List<string> deps = ExtractDependencies(json);
 
             if (string.IsNullOrEmpty(displayName)) displayName = name ?? "";
-            return new PackageInfo
-            {
-                name = name ?? "",
-                displayName = displayName,
-                version = string.IsNullOrEmpty(version) ? "0.0.0" : version,
-                description = description ?? "",
-                gitUrl = gitUrl,
-                dependencies = deps,
-                latestCommitSha = null // set by caller when known
-            };
+            PackageInfo pi = new PackageInfo();
+            pi.name = name ?? "";
+            pi.displayName = displayName;
+            pi.version = string.IsNullOrEmpty(version) ? "0.0.0" : version;
+            pi.description = description ?? "";
+            pi.gitUrl = gitUrl;
+            pi.dependencies = deps;
+            pi.latestCommitSha = null; // assigned by caller above
+            return pi;
         }
 
         private static string Extract(string json, string key)
         {
-            var rx = new Regex(key + @"\s*:\s*""(?<v>[^""]+)""", RegexOptions.IgnoreCase);
-            var m = rx.Match(json);
+            Regex rx = new Regex(key + "\\s*:\\s*\"(?<v>[^\"]+)\"", RegexOptions.IgnoreCase);
+            Match m = rx.Match(json);
             return m.Success ? m.Groups["v"].Value : null;
         }
 
         private static List<string> ExtractDependencies(string json)
         {
-            var list = new List<string>();
-            var depsStart = json.IndexOf("\"dependencies\"", StringComparison.OrdinalIgnoreCase);
+            List<string> list = new List<string>();
+            int depsStart = json.IndexOf("\"dependencies\"", StringComparison.OrdinalIgnoreCase);
             if (depsStart < 0) return list;
 
-            var brace = json.IndexOf('{', depsStart);
+            int brace = json.IndexOf('{', depsStart);
             if (brace < 0) return list;
 
             int depth = 1;
@@ -157,11 +152,12 @@ namespace NUPM
             }
             if (depth != 0) return list;
 
-            var block = json.Substring(brace + 1, i - brace - 2);
-            var rx = new Regex(@"""(?<name>[^""]+)""\s*:\s*""(?<ver>[^""]+)""");
-            foreach (Match m in rx.Matches(block))
+            string block = json.Substring(brace + 1, i - brace - 2);
+            Regex rx = new Regex("\"(?<name>[^\"]+)\"\\s*:\\s*\"(?<ver>[^\"]+)\"");
+            MatchCollection ms = rx.Matches(block);
+            foreach (Match m in ms)
             {
-                var dep = m.Groups["name"].Value.Trim();
+                string dep = m.Groups["name"].Value.Trim();
                 if (!string.IsNullOrEmpty(dep))
                     list.Add(dep);
             }

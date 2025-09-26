@@ -8,7 +8,7 @@ Works like NuGet or UPM but for your own curated libraries, with dependency mana
 Via Git URL in Unity Package Manager:
 
 ```
-https://github.com/boobosua/unity-nupm.git
+https://github.com/boobosua/unity-neko-package-manager.git
 ```
 
 ## Features
