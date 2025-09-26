@@ -12,63 +12,189 @@ namespace NUPM
     {
         private enum Tab { Browse, Installed }
 
+        // Simple row holder (avoid tuples to be conservative with C# settings)
+        private sealed class InstalledRow
+        {
+            public InstalledDatabase.Installed Inst;
+            public PackageInfo Remote;
+            public bool HasUpdate;
+        }
+
         private Tab _tab = Tab.Browse;
         private Vector2 _scroll;
-        private string _search = "";
+        private string _search = string.Empty;
 
-        private List<PackageInfo> _catalog = new();
-        private Dictionary<string, InstalledDatabase.Installed> _installed;
+        private List<PackageInfo> _catalog = new List<PackageInfo>();
+        private Dictionary<string, InstalledDatabase.Installed> _installed =
+            new Dictionary<string, InstalledDatabase.Installed>(StringComparer.OrdinalIgnoreCase);
 
-        private bool _init;
-        private bool _loading;
+        private bool _init;             // set after first init pass
+        private bool _loading;          // true while first init is in progress
+        private bool _scheduledInit;    // avoid multiple delayCall in OnEnable
+
+        // Single-flight refresh (prevents double refresh)
+        private Task _refreshTask;      // current in-flight refresh task (if any)
+
+        // Debounced/delayed refresh request
+        private bool _delayedRefreshArmed;
+        private double _delayedRefreshUntil;
+
+        // Bootstrap auto-retry on empty/timeout
+        private bool _bootstrapRetryHooked;
+        private int _bootstrapRetriesLeft = 5;
+        private double _nextRetryAt;
+
+        // Timeout + user hint
+        private const int RefreshTimeoutMs = 10000; // 10s cap for catalog refresh
+        private bool _lastRefreshTimedOut;
 
         [MenuItem("Window/NUPM")]
         public static void ShowWindow()
         {
-            var w = GetWindow<NUPMWindow>("NUPM");
-            w.minSize = new Vector2(720, 480);
+            NUPMWindow w = GetWindow<NUPMWindow>("NUPM");
+            w.minSize = new Vector2(720f, 480f);
         }
 
         private void OnEnable()
         {
-            _ = InitializeAsync();
+            if (!_scheduledInit)
+            {
+                _scheduledInit = true;
+                EditorApplication.delayCall += OnDelayCallInit;
+            }
+
             UnityEditor.PackageManager.Events.registeredPackages += OnRegisteredPackages;
+            EditorApplication.update += OnEditorUpdate;
         }
 
         private void OnDisable()
         {
             UnityEditor.PackageManager.Events.registeredPackages -= OnRegisteredPackages;
+            EditorApplication.update -= OnEditorUpdate;
+            StopBootstrapRetries();
         }
 
-        private void OnRegisteredPackages(UnityEditor.PackageManager.PackageRegistrationEventArgs args)
+        private async void OnDelayCallInit()
         {
-            _ = RefreshAsync();
+            // Window may have been closed before delayCall fires
+            if (this == null) return;
+            await InitializeAsync();
+            TryBeginBootstrapRetries();
         }
 
         private async Task InitializeAsync()
         {
-            if (_init) return;
+            if (_init || _loading) return;
             _loading = true; Repaint();
-            await RefreshAsync();
+
+            await RefreshAsyncCoalesced(); // single-flight guarded
+
             _init = true;
             _loading = false; Repaint();
         }
 
-        private void OnFocus() => _ = RefreshAsync();
-
-        private async Task RefreshAsync()
+        private void OnRegisteredPackages(UnityEditor.PackageManager.PackageRegistrationEventArgs args)
         {
-            _installed = await InstalledDatabase.SnapshotAsync();
-            _catalog = await PackageRegistry.RefreshAsync();
-            Repaint();
+            // Debounce UPM events (they can fire in bursts)
+            RequestRefresh(0.2);
+        }
+
+        private void OnFocus()
+        {
+            RequestRefresh(0.2);
+            TryBeginBootstrapRetries();
+        }
+
+        private void OnEditorUpdate()
+        {
+            // Handle delayed/debounced refresh requests
+            if (_delayedRefreshArmed && EditorApplication.timeSinceStartup >= _delayedRefreshUntil)
+            {
+                _delayedRefreshArmed = false;
+                _ = RefreshAsyncCoalesced(); // fire single-flight refresh
+            }
+
+            // Bootstrap retry pump
+            if (_bootstrapRetryHooked && EditorApplication.timeSinceStartup >= _nextRetryAt)
+            {
+                if (_catalog != null && _catalog.Count > 0)
+                {
+                    StopBootstrapRetries();
+                }
+                else if (_bootstrapRetriesLeft > 0)
+                {
+                    _bootstrapRetriesLeft--;
+                    _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
+                    _ = RefreshAsyncCoalesced(); // coalesced if one is running
+                }
+                else
+                {
+                    StopBootstrapRetries();
+                }
+            }
+        }
+
+        // Public-ish trigger points should call this, not RefreshAsync directly
+        private void RequestRefresh(double delaySeconds)
+        {
+            if (delaySeconds <= 0.0)
+            {
+                _ = RefreshAsyncCoalesced();
+                return;
+            }
+            _delayedRefreshArmed = true;
+            _delayedRefreshUntil = EditorApplication.timeSinceStartup + delaySeconds;
+        }
+
+        // Ensures only ONE refresh runs at a time. Subsequent calls reuse the same task.
+        private Task RefreshAsyncCoalesced()
+        {
+            if (_refreshTask != null && !_refreshTask.IsCompleted)
+                return _refreshTask;
+
+            _refreshTask = RefreshAsyncInternal();
+            return _refreshTask;
+        }
+
+        private async Task RefreshAsyncInternal()
+        {
+            try
+            {
+                // Run both with an overall 10s timeout
+                Task<Dictionary<string, InstalledDatabase.Installed>> installedTask = InstalledDatabase.SnapshotAsync();
+                Task<List<PackageInfo>> catalogTask = PackageRegistry.RefreshAsync();
+
+                Task all = Task.WhenAll(installedTask, catalogTask);
+                Task completed = await Task.WhenAny(all, Task.Delay(RefreshTimeoutMs));
+                if (completed != all)
+                {
+                    _lastRefreshTimedOut = true;
+                    Debug.LogWarning("[NUPM] Refresh timed out after 10s (network/UPM may be unavailable).");
+                    return; // keep previous state; bootstrap retries will try again
+                }
+
+                // Success: assign results
+                _installed = installedTask.Result ?? new Dictionary<string, InstalledDatabase.Installed>(StringComparer.OrdinalIgnoreCase);
+                _catalog = catalogTask.Result ?? new List<PackageInfo>();
+                _lastRefreshTimedOut = false;
+            }
+            catch (Exception e)
+            {
+                _lastRefreshTimedOut = false; // an actual error, not timeout
+                Debug.LogWarning("[NUPM] Refresh failed: " + e.Message);
+            }
+            finally
+            {
+                Repaint();
+            }
         }
 
         private void OnGUI()
         {
-            if (!_init || _loading)
+            if (!_init)
             {
                 GUILayout.FlexibleSpace();
-                GUILayout.Label("Loading NUPM…", EditorStyles.centeredGreyMiniLabel);
+                GUILayout.Label(_loading ? "Loading NUPM…" : "Initializing…", EditorStyles.centeredGreyMiniLabel);
                 GUILayout.FlexibleSpace();
                 return;
             }
@@ -78,7 +204,29 @@ namespace NUPM
             if (_tab == Tab.Browse) DrawBrowse();
             else DrawInstalled();
             GUILayout.EndScrollView();
+
+            // If UI drew but catalog is empty, ensure bootstrapping
+            TryBeginBootstrapRetries();
         }
+
+        // -------- Bootstrap retry engine --------
+
+        private void TryBeginBootstrapRetries()
+        {
+            if (_catalog != null && _catalog.Count > 0) { StopBootstrapRetries(); return; }
+            if (_bootstrapRetryHooked) return;
+
+            _bootstrapRetryHooked = true;
+            _bootstrapRetriesLeft = 5;
+            _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
+        }
+
+        private void StopBootstrapRetries()
+        {
+            _bootstrapRetryHooked = false;
+        }
+
+        // -------- UI --------
 
         private void DrawToolbar()
         {
@@ -89,78 +237,97 @@ namespace NUPM
 
                 GUILayout.Space(8);
                 GUILayout.Label("Search:", GUILayout.Width(48));
-                _search = GUILayout.TextField(_search, GUILayout.MinWidth(160));
+                _search = GUILayout.TextField(_search ?? string.Empty, GUILayout.MinWidth(160));
 
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("Refresh", EditorStyles.toolbarButton, GUILayout.Width(80)))
-                    _ = RefreshAsync();
+                    RequestRefresh(0.0); // coalesced
             }
         }
 
         private IEnumerable<PackageInfo> Filter(IEnumerable<PackageInfo> src)
         {
+            if (src == null) return Enumerable.Empty<PackageInfo>();
             if (string.IsNullOrEmpty(_search)) return src;
-            var s = _search.ToLowerInvariant();
+            string s = _search.ToLowerInvariant();
             return src.Where(p =>
-                (p.name?.ToLowerInvariant().Contains(s) ?? false) ||
-                (p.displayName?.ToLowerInvariant().Contains(s) ?? false) ||
-                (p.description?.ToLowerInvariant().Contains(s) ?? false));
+                ((p.name != null) && p.name.ToLowerInvariant().Contains(s)) ||
+                ((p.displayName != null) && p.displayName.ToLowerInvariant().Contains(s)) ||
+                ((p.description != null) && p.description.ToLowerInvariant().Contains(s)));
         }
 
         private void DrawBrowse()
         {
-            var list = Filter(_catalog).ToList();
+            List<PackageInfo> list = new List<PackageInfo>(Filter(_catalog));
+
             if (list.Count == 0)
             {
-                EditorGUILayout.HelpBox("No packages in your registry.", MessageType.Info);
+                string msg = _lastRefreshTimedOut
+                    ? "Network/UPM may be slow or offline. Retrying automatically…"
+                    : "No packages in your registry (still initializing…)";
+                EditorGUILayout.HelpBox(msg, MessageType.Info);
                 return;
             }
 
-            foreach (var pkg in list)
-                DrawPackageCard(pkg, showUpdateBadge: true);
+            foreach (PackageInfo pkg in list)
+                DrawPackageCard(pkg, true);
         }
 
         private void DrawInstalled()
         {
-            var regNames = new HashSet<string>(_catalog.Select(c => c.name));
-            var installed = _installed?.Values?.Where(i => regNames.Contains(i.name)).ToList()
-                           ?? new List<InstalledDatabase.Installed>();
+            HashSet<string> regNames = new HashSet<string>(_catalog.Select(c => c.name), StringComparer.OrdinalIgnoreCase);
+            List<InstalledDatabase.Installed> installedList =
+                (_installed != null && _installed.Values != null)
+                ? _installed.Values.Where(i => i != null && regNames.Contains(i.name)).ToList()
+                : new List<InstalledDatabase.Installed>();
 
-            if (installed.Count == 0)
+            if (installedList.Count == 0)
             {
                 EditorGUILayout.HelpBox("No custom packages installed.", MessageType.Info);
                 return;
             }
 
-            var rows = new List<(InstalledDatabase.Installed inst, PackageInfo remote, bool hasUpdate)>();
-            foreach (var i in installed)
+            List<InstalledRow> rows = new List<InstalledRow>();
+            for (int idx = 0; idx < installedList.Count; idx++)
             {
+                InstalledDatabase.Installed i = installedList[idx];
                 PackageInfo remote = null;
-                if (PackageRegistry.TryGetByName(i.name, out var r)) remote = r;
-                bool hasUpdate = remote != null && IsNewer(remote.version, i.version);
-                rows.Add((i, remote, hasUpdate));
+                if (i != null && i.name != null && PackageRegistry.TryGetByName(i.name, out remote)) { /* remote set */ }
+
+                bool hasUpdate = (remote != null) && IsNewer(remote.version, i.version);
+                InstalledRow row = new InstalledRow { Inst = i, Remote = remote, HasUpdate = hasUpdate };
+                rows.Add(row);
             }
 
-            foreach (var row in rows.OrderByDescending(r => r.hasUpdate).ThenBy(r => r.inst.displayName))
+            // Order: updates first, then by display name
+            rows.Sort((a, b) =>
             {
-                if (!string.IsNullOrEmpty(_search))
+                int byUpdate = b.HasUpdate.CompareTo(a.HasUpdate);
+                if (byUpdate != 0) return byUpdate;
+                string an = (a.Inst != null && a.Inst.displayName != null) ? a.Inst.displayName : string.Empty;
+                string bn = (b.Inst != null && b.Inst.displayName != null) ? b.Inst.displayName : string.Empty;
+                return string.Compare(an, bn, StringComparison.OrdinalIgnoreCase);
+            });
+
+            // Filter by search
+            string s = string.IsNullOrEmpty(_search) ? null : _search.ToLowerInvariant();
+            foreach (InstalledRow row in rows)
+            {
+                if (s != null)
                 {
-                    var s = _search.ToLowerInvariant();
-                    if (!(row.inst.name.ToLowerInvariant().Contains(s) || row.inst.displayName.ToLowerInvariant().Contains(s)))
-                        continue;
+                    string n = (row.Inst != null && row.Inst.name != null) ? row.Inst.name.ToLowerInvariant() : string.Empty;
+                    string dn = (row.Inst != null && row.Inst.displayName != null) ? row.Inst.displayName.ToLowerInvariant() : string.Empty;
+                    if (!(n.Contains(s) || dn.Contains(s))) continue;
                 }
-                DrawInstalledCard(row.inst, row.remote, row.hasUpdate);
+                DrawInstalledCard(row.Inst, row.Remote, row.HasUpdate);
             }
         }
 
         private void DrawPackageCard(PackageInfo pkg, bool showUpdateBadge)
         {
-            bool isInstalled = _installed != null && _installed.ContainsKey(pkg.name);
-
-            // ✅ FIX: explicitly initialize 'inst' to avoid CS0165
-            InstalledDatabase.Installed inst = null;
-            if (_installed != null)
-                _installed.TryGetValue(pkg.name, out inst);
+            bool isInstalled = (_installed != null) && _installed.ContainsKey(pkg.name);
+            InstalledDatabase.Installed inst;
+            if (_installed == null || !_installed.TryGetValue(pkg.name, out inst)) inst = null;
 
             bool hasUpdate = showUpdateBadge && inst != null && IsNewer(pkg.version, inst.version);
 
@@ -168,18 +335,18 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    var title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
+                    GUIStyle title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
                     GUILayout.Label(pkg.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
                 }
 
-                GUILayout.Label($"Name: {pkg.name}", EditorStyles.miniLabel);
-                GUILayout.Label($"Version: {pkg.version}", EditorStyles.miniLabel);
+                GUILayout.Label("Name: " + pkg.name, EditorStyles.miniLabel);
+                GUILayout.Label("Version: " + pkg.version, EditorStyles.miniLabel);
                 if (!string.IsNullOrEmpty(pkg.description))
                     GUILayout.Label(pkg.description, EditorStyles.wordWrappedMiniLabel);
                 if (pkg.dependencies != null && pkg.dependencies.Count > 0)
-                    GUILayout.Label($"Dependencies: {string.Join(", ", pkg.dependencies)}", EditorStyles.miniLabel);
+                    GUILayout.Label("Dependencies: " + string.Join(", ", pkg.dependencies.ToArray()), EditorStyles.miniLabel);
 
                 using (new GUILayout.HorizontalScope())
                 {
@@ -209,15 +376,15 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    var title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
+                    GUIStyle title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
                     GUILayout.Label(inst.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
                 }
 
-                GUILayout.Label($"Name: {inst.name}", EditorStyles.miniLabel);
-                GUILayout.Label($"Installed: {inst.version} [{inst.source}]", EditorStyles.miniLabel);
-                if (remote != null) GUILayout.Label($"Latest:    {remote.version}", EditorStyles.miniLabel);
+                GUILayout.Label("Name: " + inst.name, EditorStyles.miniLabel);
+                GUILayout.Label("Installed: " + inst.version + " [" + inst.source + "]", EditorStyles.miniLabel);
+                if (remote != null) GUILayout.Label("Latest:    " + remote.version, EditorStyles.miniLabel);
 
                 using (new GUILayout.HorizontalScope())
                 {
@@ -243,7 +410,7 @@ namespace NUPM
         private static Version SafeVer(string s)
         {
             if (string.IsNullOrEmpty(s)) return new Version(0, 0, 0);
-            try { return new Version(s.Split('+', '-', ' ')[0]); }
+            try { return new Version(s.Split(new[] { '+', '-', ' ' })[0]); }
             catch { return new Version(0, 0, 0); }
         }
 
@@ -253,25 +420,26 @@ namespace NUPM
         {
             try
             {
-                var resolver = new DependencyResolver();
-                var order = resolver.ResolveDependencies(root, _catalog);
+                DependencyResolver resolver = new DependencyResolver();
+                List<PackageInfo> order = resolver.ResolveDependencies(root, _catalog);
 
-                var toInstall = new List<PackageInfo>();
-                foreach (var p in order)
+                List<PackageInfo> toInstall = new List<PackageInfo>();
+                for (int i = 0; i < order.Count; i++)
                 {
-                    bool already = _installed != null && _installed.ContainsKey(p.name);
+                    PackageInfo p = order[i];
+                    bool already = (_installed != null) && _installed.ContainsKey(p.name);
                     if (!already) toInstall.Add(p);
                 }
 
                 if (toInstall.Count > 0)
                 {
-                    var depOnly = toInstall.Where(p => p.name != root.name).ToList();
+                    List<PackageInfo> depOnly = toInstall.Where(p => !string.Equals(p.name, root.name, StringComparison.OrdinalIgnoreCase)).ToList();
                     if (depOnly.Count > 0)
                     {
-                        var names = string.Join(", ", depOnly.Select(d => d.displayName));
+                        string names = string.Join(", ", depOnly.Select(d => d.displayName).ToArray());
                         bool proceed = EditorUtility.DisplayDialog(
                             "Install Dependencies",
-                            $"\"{root.displayName}\" requires:\n{names}\n\nInstall dependencies first?",
+                            "\"" + root.displayName + "\" requires:\n" + names + "\n\nInstall dependencies first?",
                             "Install All",
                             "Cancel");
                         if (!proceed) return;
@@ -279,24 +447,24 @@ namespace NUPM
 
                     for (int i = 0; i < toInstall.Count; i++)
                     {
-                        var p = toInstall[i];
+                        PackageInfo p = toInstall[i];
                         EditorUtility.DisplayProgressBar("Installing",
-                            $"Installing {p.displayName} ({i + 1}/{toInstall.Count})…",
-                            (float)(i + 1) / toInstall.Count);
+                            "Installing " + p.displayName + " (" + (i + 1) + "/" + toInstall.Count + ")…",
+                            (float)(i + 1) / (float)toInstall.Count);
 
                         await PackageInstaller.InstallPackageAsync(p);
                     }
                     EditorUtility.ClearProgressBar();
                 }
 
-                await RefreshAsync();
-                EditorUtility.DisplayDialog("Success", $"{root.displayName} installed successfully!", "OK");
+                RequestRefresh(0.1);
+                EditorUtility.DisplayDialog("Success", root.displayName + " installed successfully!", "OK");
             }
             catch (Exception e)
             {
                 EditorUtility.ClearProgressBar();
-                EditorUtility.DisplayDialog("Error", $"Installation failed:\n{e.Message}", "OK");
-                Debug.LogError($"[NUPM] Install error: {e}");
+                EditorUtility.DisplayDialog("Error", "Installation failed:\n" + e.Message, "OK");
+                Debug.LogError("[NUPM] Install error: " + e);
             }
         }
 
@@ -304,17 +472,17 @@ namespace NUPM
         {
             try
             {
-                EditorUtility.DisplayProgressBar("Updating", $"Updating {latest.displayName}…", 0.5f);
+                EditorUtility.DisplayProgressBar("Updating", "Updating " + latest.displayName + "…", 0.5f);
                 await PackageInstaller.InstallPackageAsync(latest);
                 EditorUtility.ClearProgressBar();
-                await RefreshAsync();
-                EditorUtility.DisplayDialog("Success", $"{latest.displayName} updated!", "OK");
+                RequestRefresh(0.1);
+                EditorUtility.DisplayDialog("Success", latest.displayName + " updated!", "OK");
             }
             catch (Exception e)
             {
                 EditorUtility.ClearProgressBar();
-                EditorUtility.DisplayDialog("Error", $"Update failed:\n{e.Message}", "OK");
-                Debug.LogError($"[NUPM] Update error: {e}");
+                EditorUtility.DisplayDialog("Error", "Update failed:\n" + e.Message, "OK");
+                Debug.LogError("[NUPM] Update error: " + e);
             }
         }
 
@@ -322,30 +490,30 @@ namespace NUPM
         {
             try
             {
-                var installedKeys = _installed != null ? _installed.Keys.ToList() : new List<string>();
-                var installedCustom = new HashSet<string>(installedKeys, StringComparer.OrdinalIgnoreCase);
+                List<string> installedKeys = (_installed != null) ? new List<string>(_installed.Keys) : new List<string>();
+                HashSet<string> installedCustom = new HashSet<string>(installedKeys, StringComparer.OrdinalIgnoreCase);
 
-                var dependents = _catalog
+                List<PackageInfo> dependents = _catalog
                     .Where(p => p.dependencies != null && p.dependencies.Contains(package.name))
                     .Where(p => installedCustom.Contains(p.name))
                     .ToList();
 
                 if (dependents.Count > 0)
                 {
-                    var list = string.Join(", ", dependents.Select(d => d.displayName));
+                    string list = string.Join(", ", dependents.Select(d => d.displayName).ToArray());
                     bool alsoUninstall = EditorUtility.DisplayDialog(
                         "Package is required",
-                        $"{package.displayName} is required by:\n{list}\n\nUninstall dependents first?",
+                        package.displayName + " is required by:\n" + list + "\n\nUninstall dependents first?",
                         "Uninstall Dependents",
                         "Cancel");
                     if (!alsoUninstall) return;
 
                     for (int i = 0; i < dependents.Count; i++)
                     {
-                        var dep = dependents[i];
+                        PackageInfo dep = dependents[i];
                         EditorUtility.DisplayProgressBar("Uninstalling dependents",
-                            $"Removing {dep.displayName} ({i + 1}/{dependents.Count})…",
-                            (float)(i + 1) / (dependents.Count + 1));
+                            "Removing " + dep.displayName + " (" + (i + 1) + "/" + dependents.Count + ")…",
+                            (float)(i + 1) / (float)(dependents.Count + 1));
 
                         await PackageInstaller.UninstallPackageAsync(new PackageInfo { name = dep.name, displayName = dep.displayName });
                     }
@@ -354,19 +522,19 @@ namespace NUPM
 
                 bool proceed = EditorUtility.DisplayDialog(
                     "Uninstall Package",
-                    $"Uninstall {package.displayName}?",
+                    "Uninstall " + package.displayName + "?",
                     "Uninstall", "Cancel");
                 if (!proceed) return;
 
                 await PackageInstaller.UninstallPackageAsync(package);
-                await RefreshAsync();
-                EditorUtility.DisplayDialog("Success", $"{package.displayName} uninstalled successfully!", "OK");
+                RequestRefresh(0.1);
+                EditorUtility.DisplayDialog("Success", package.displayName + " uninstalled successfully!", "OK");
             }
             catch (Exception e)
             {
                 EditorUtility.ClearProgressBar();
-                EditorUtility.DisplayDialog("Error", $"Uninstallation failed:\n{e.Message}", "OK");
-                Debug.LogError($"[NUPM] Uninstall error: {e}");
+                EditorUtility.DisplayDialog("Error", "Uninstallation failed:\n" + e.Message, "OK");
+                Debug.LogError("[NUPM] Uninstall error: " + e);
             }
         }
     }
