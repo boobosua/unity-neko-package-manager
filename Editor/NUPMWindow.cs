@@ -45,7 +45,7 @@ namespace NUPM
         private double _delayedRefreshUntil;
 
         private bool _bootstrapRetryHooked;
-        private int _bootstrapRetriesLeft = 5;
+        private int _bootstrapRetriesLeft = 3;  // gentle
         private double _nextRetryAt;
 
         private bool _lastRefreshTimedOut;
@@ -54,6 +54,9 @@ namespace NUPM
         // ---- Install Queue UI tracking ----
         private readonly List<TrackOp> _tracked = new List<TrackOp>();               // visual order
         private readonly Dictionary<string, TrackOp> _byId = new Dictionary<string, TrackOp>(StringComparer.OrdinalIgnoreCase);
+
+        // re-entrancy guard for update
+        private bool _inEditorUpdate;
 
         [MenuItem("NUPM/Package Manager", priority = 0)]
         public static void ShowWindow()
@@ -117,9 +120,9 @@ namespace NUPM
         private void OnRegisteredPackages(UnityEditor.PackageManager.PackageRegistrationEventArgs args)
         {
             // Keep NUPM in sync with UPM, but avoid refreshing mid-import.
-            if (NUPMInstallQueue.IsBusy)
+            if (NUPMInstallQueue.IsBusy || EditorApplication.isCompiling || EditorApplication.isUpdating)
             {
-                _pendingRefreshFromUPM = true; // defer until queue becomes idle
+                _pendingRefreshFromUPM = true; // defer until queue/editor becomes idle
                 return;
             }
             RequestRefresh(0.3); // small debounce
@@ -127,17 +130,13 @@ namespace NUPM
 
         private void OnQueueBecameIdle()
         {
-            if (_pendingRefreshFromUPM)
+            // Schedule a refresh when the editor is actually idle; do not run inline.
+            EditorApplication.delayCall += () =>
             {
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating) { _pendingRefreshFromUPM = true; return; }
                 _pendingRefreshFromUPM = false;
                 RequestRefresh(0.3);
-            }
-            else
-            {
-                RequestRefresh(0.3);
-            }
-            // When queue becomes truly empty, we keep the completed list visible
-            // for this session; it resets when the window is reopened.
+            };
         }
 
         private void OnOpsEnqueued(List<NUPMInstallOp> ops)
@@ -205,37 +204,54 @@ namespace NUPM
 
         private void OnFocus()
         {
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
+
             RequestRefresh(0.2);
             TryBeginBootstrapRetries();
 
-            // In case queue existed before focus, adopt snapshot again (idempotent)
             AdoptPendingSnapshot();
         }
 
         private void OnEditorUpdate()
         {
-            if (_delayedRefreshArmed && EditorApplication.timeSinceStartup >= _delayedRefreshUntil)
-            {
-                _delayedRefreshArmed = false;
-                _ = RefreshAsyncCoalesced();
-            }
+            // No heavy work here; schedule via delayCall to keep update tick free.
+            if (_inEditorUpdate) return;
+            _inEditorUpdate = true;
 
-            if (_bootstrapRetryHooked && EditorApplication.timeSinceStartup >= _nextRetryAt)
+            try
             {
-                if (_catalog != null && _catalog.Count > 0)
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                    return;
+
+                double now = EditorApplication.timeSinceStartup;
+
+                if (_delayedRefreshArmed && now >= _delayedRefreshUntil)
                 {
-                    _bootstrapRetryHooked = false;
+                    _delayedRefreshArmed = false;
+                    EditorApplication.delayCall += async () => await RefreshAsyncCoalesced();
                 }
-                else if (_bootstrapRetriesLeft > 0)
+
+                if (_bootstrapRetryHooked && now >= _nextRetryAt)
                 {
-                    _bootstrapRetriesLeft--;
-                    _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
-                    _ = RefreshAsyncCoalesced();
+                    if (_catalog != null && _catalog.Count > 0)
+                    {
+                        _bootstrapRetryHooked = false;
+                    }
+                    else if (_bootstrapRetriesLeft > 0)
+                    {
+                        _bootstrapRetriesLeft--;
+                        _nextRetryAt = now + 2.0; // slower retry
+                        EditorApplication.delayCall += async () => await RefreshAsyncCoalesced();
+                    }
+                    else
+                    {
+                        _bootstrapRetryHooked = false;
+                    }
                 }
-                else
-                {
-                    _bootstrapRetryHooked = false;
-                }
+            }
+            finally
+            {
+                _inEditorUpdate = false;
             }
         }
 
@@ -243,7 +259,7 @@ namespace NUPM
         {
             if (delaySeconds <= 0.0)
             {
-                _ = RefreshAsyncCoalesced();
+                EditorApplication.delayCall += async () => await RefreshAsyncCoalesced();
                 return;
             }
             _delayedRefreshArmed = true;
@@ -303,7 +319,7 @@ namespace NUPM
             }
 
             DrawToolbar();
-            DrawInstallQueuePanel(); // NEW: visual status
+            DrawInstallQueuePanel(); // visual status
 
             _scroll = GUILayout.BeginScrollView(_scroll);
             if (_tab == Tab.Browse) DrawBrowse();
@@ -319,8 +335,8 @@ namespace NUPM
             if (_bootstrapRetryHooked) return;
 
             _bootstrapRetryHooked = true;
-            _bootstrapRetriesLeft = 5;
-            _nextRetryAt = EditorApplication.timeSinceStartup + 0.6;
+            _bootstrapRetriesLeft = 3;
+            _nextRetryAt = EditorApplication.timeSinceStartup + 2.0;
         }
 
         private void DrawToolbar()
@@ -343,7 +359,6 @@ namespace NUPM
         // --------- Install Queue Panel ----------
         private void DrawInstallQueuePanel()
         {
-            // Show the panel if we have any non-empty tracked ops OR the queue is busy.
             bool hasAny = _tracked.Count > 0 || NUPMInstallQueue.IsBusy;
             if (!hasAny) return;
 
@@ -362,7 +377,6 @@ namespace NUPM
                 {
                     using (new GUILayout.HorizontalScope())
                     {
-                        // State badge
                         string badge = t.state switch
                         {
                             OpState.Pending => "•",
@@ -372,13 +386,8 @@ namespace NUPM
                             _ => "•"
                         };
                         GUILayout.Label(badge, GUILayout.Width(16));
-
-                        // Name
                         GUILayout.Label(t.display + "  (" + t.id + ")", EditorStyles.miniLabel);
-
                         GUILayout.FlexibleSpace();
-
-                        // State text
                         string text = t.state switch
                         {
                             OpState.Pending => "Pending",
@@ -391,9 +400,7 @@ namespace NUPM
                     }
 
                     if (t.state == OpState.Failed && !string.IsNullOrEmpty(t.error))
-                    {
                         EditorGUILayout.LabelField("  ↳ " + t.error, EditorStyles.wordWrappedMiniLabel);
-                    }
                 }
             }
         }
@@ -714,7 +721,6 @@ namespace NUPM
             }
         }
 
-        // NOTE: no 'async' modifier; returns a completed Task.
         private Task UpdatePackageAsync(PackageInfo latest)
         {
             try
@@ -724,7 +730,6 @@ namespace NUPM
                     new NUPMInstallOp { name = latest.name, display = latest.displayName, gitUrl = latest.gitUrl }
                 };
                 NUPMInstallQueue.Enqueue(ops);
-                // no popup; progress shows in the Install Queue panel
             }
             catch (Exception e)
             {
@@ -738,7 +743,6 @@ namespace NUPM
         {
             try
             {
-                // Take a fresh snapshot so we know current dependents.
                 Dictionary<string, InstalledDatabase.Installed> installedNow = await InstalledDatabase.SnapshotAsync();
                 HashSet<string> installedCustom = new HashSet<string>((installedNow ?? new Dictionary<string, InstalledDatabase.Installed>()).Keys,
                                                                       StringComparer.OrdinalIgnoreCase);
@@ -769,7 +773,7 @@ namespace NUPM
                 if (!proceed) return;
 
                 await PackageInstaller.UninstallPackageAsync(package);
-                await AwaitEditorIdleAsync(2.0, 30.0); // wait for a clean idle to avoid stale Browse state
+                await AwaitEditorIdleAsync(2.0, 30.0);
                 await RefreshAsyncCoalesced();
 
                 EditorUtility.DisplayDialog("Success", package.displayName + " uninstalled successfully!", "OK");

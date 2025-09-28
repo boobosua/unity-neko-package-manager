@@ -6,7 +6,7 @@ namespace NUPM
 {
     /// <summary>
     /// Editor-only settings stored in ProjectSettings/NUPMSettings.asset.
-    /// This file is never compiled into player builds.
+    /// Not included in player builds.
     /// </summary>
     internal sealed class NUPMSettings : ScriptableSingleton<NUPMSettings>
     {
@@ -35,45 +35,103 @@ namespace NUPM
         /// <summary>Convenience alias so other editor scripts can keep calling NUPMSettings.Instance.</summary>
         public static NUPMSettings Instance => instance;
 
-        void OnEnable() => hideFlags = HideFlags.HideAndDontSave;
+        private void OnEnable()
+        {
+            // Hide the asset; ScriptableSingleton handles persistence in ProjectSettings
+            hideFlags = HideFlags.HideAndDontSave;
+        }
 
-        // Draw a Project Settings page under Project/NUPM
+        // Project Settings page under Project/NUPM
         [SettingsProvider]
         private static SettingsProvider CreateSettingsProvider()
         {
-            var provider = new SettingsProvider("Project/NUPM", SettingsScope.Project)
+            return new SettingsProvider("Project/NUPM", SettingsScope.Project)
             {
                 label = "NUPM",
                 guiHandler = _ =>
                 {
                     var s = Instance;
-                    var so = new SerializedObject(s);
 
                     EditorGUILayout.HelpBox("NUPM – Timing & Timeout Settings (Editor-only)", MessageType.Info);
                     EditorGUILayout.Space(4);
 
                     EditorGUILayout.LabelField("Queue cadence", EditorStyles.boldLabel);
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(idleStableSeconds)), new GUIContent("Idle Stable Seconds"));
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(postReloadCooldownSeconds)), new GUIContent("Post-Reload Cooldown (s)"));
+                    EditorGUI.BeginChangeCheck();
+                    s.idleStableSeconds = Mathf.Max(0.2f,
+                        EditorGUILayout.FloatField(new GUIContent("Idle Stable Seconds",
+                            "Required continuous idle time before starting the next queued install."), s.idleStableSeconds));
+                    s.postReloadCooldownSeconds = Mathf.Max(0f,
+                        EditorGUILayout.FloatField(new GUIContent("Post-Reload Cooldown (s)",
+                            "Extra delay after a domain reload before queue resumes."), s.postReloadCooldownSeconds));
 
                     EditorGUILayout.Space();
                     EditorGUILayout.LabelField("UPM operation polling", EditorStyles.boldLabel);
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(requestPollIntervalMs)), new GUIContent("Request Poll Interval (ms)"));
+                    s.requestPollIntervalMs = Mathf.Clamp(
+                        EditorGUILayout.IntSlider(new GUIContent("Request Poll Interval (ms)",
+                            "How often to poll Unity Package Manager requests."), s.requestPollIntervalMs, 20, 500),
+                        20, 500);
 
                     EditorGUILayout.Space();
                     EditorGUILayout.LabelField("UPM timeouts", EditorStyles.boldLabel);
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(installTimeoutSeconds)), new GUIContent("Install Timeout (s)"));
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(uninstallTimeoutSeconds)), new GUIContent("Uninstall Timeout (s)"));
+                    s.installTimeoutSeconds = Mathf.Max(1,
+                        EditorGUILayout.IntField(new GUIContent("Install Timeout (s)",
+                            "Max time to wait for a single install before timing out."), s.installTimeoutSeconds));
+                    s.uninstallTimeoutSeconds = Mathf.Max(1,
+                        EditorGUILayout.IntField(new GUIContent("Uninstall Timeout (s)",
+                            "Max time to wait for a single uninstall before timing out."), s.uninstallTimeoutSeconds));
 
                     EditorGUILayout.Space();
                     EditorGUILayout.LabelField("UI refresh", EditorStyles.boldLabel);
-                    EditorGUILayout.PropertyField(so.FindProperty(nameof(refreshTimeoutSeconds)), new GUIContent("Refresh Timeout (s)"));
+                    s.refreshTimeoutSeconds = Mathf.Max(1,
+                        EditorGUILayout.IntField(new GUIContent("Refresh Timeout (s)",
+                            "Soft timeout for Browse/Installed refresh; avoids hanging when offline."), s.refreshTimeoutSeconds));
 
-                    if (so.ApplyModifiedProperties())
+                    EditorGUILayout.Space(6);
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.FlexibleSpace();
+                        if (GUILayout.Button("Reset to Defaults", GUILayout.Width(150)))
+                        {
+                            ResetToDefaults(s);
+                        }
+                    }
+
+                    if (EditorGUI.EndChangeCheck())
+                    {
                         s.Save(true); // persist to ProjectSettings/NUPMSettings.asset
+                        // Make sure the Inspector reflects saved values immediately
+                        RepaintAllInspectors();
+                    }
                 }
             };
-            return provider;
+        }
+
+        // Menu shortcut: NUPM/Settings -> opens the Project Settings page
+        [MenuItem("NUPM/Settings", priority = 1)]
+        private static void OpenNupmSettings()
+        {
+            SettingsService.OpenProjectSettings("Project/NUPM");
+        }
+
+        private static void ResetToDefaults(NUPMSettings s)
+        {
+            s.idleStableSeconds = 2.0f;
+            s.postReloadCooldownSeconds = 1.5f;
+            s.requestPollIntervalMs = 80;
+            s.installTimeoutSeconds = 300;
+            s.uninstallTimeoutSeconds = 300;
+            s.refreshTimeoutSeconds = 10;
+            s.Save(true);
+            RepaintAllInspectors();
+        }
+
+        private static void RepaintAllInspectors()
+        {
+            // Nicety so changes show immediately in Project Settings panel
+            foreach (var win in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            {
+                if (win != null) win.Repaint();
+            }
         }
     }
 }
