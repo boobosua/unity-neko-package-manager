@@ -11,55 +11,85 @@ namespace NUPM
     internal class NUPMInstallOp
     {
         public string name;       // e.g., com.unity.nuget.newtonsoft-json or com.nekoindie.nekounity.lib
-        public string display;    // optional pretty label
+        public string display;    // pretty label
         public string gitUrl;     // null/empty => install by name
     }
 
     /// <summary>
-    /// Persisted queue that survives domain reloads. Installs exactly one package when the Editor is idle,
-    /// then waits for import/compile to finish before attempting the next.
-    /// Emits BecameIdle **only once** when the queue transitions to empty.
+    /// Persisted queue that survives domain reloads. Installs exactly one package when the Editor
+    /// has been idle long enough, then waits for import/compile to finish before attempting the next.
+    /// Emits BecameIdle only when transitioning non-empty -> empty.
+    /// Compatible with Unity 2021+ and 6+.
     /// </summary>
     [InitializeOnLoad]
     internal static class NUPMInstallQueue
     {
         private const string QueueKey = "NUPM.InstallQueue.v1";
+
         private static readonly Queue<NUPMInstallOp> _queue;
         private static bool _processing;
         private static double _idleStart = -1;
 
-        private static bool _wasEmpty = true;   // <-- transition guard
+        private static bool _wasEmpty = true;
+        private static double _lastReloadAt; // timeSinceStartup at last domain reload or static init
 
         public static bool IsBusy => _processing || _queue.Count > 0;
 
-        /// <summary>Raised exactly once when the queue transitions from non-empty to empty.</summary>
+        // ---- Progress events for UI (Editor thread) ----
+        public static event Action<List<NUPMInstallOp>> OpsEnqueued;
+        public static event Action<NUPMInstallOp> InstallStarted;
+        public static event Action<NUPMInstallOp> InstallSucceeded;
+        public static event Action<NUPMInstallOp, string> InstallFailed;
+
         public static event Action BecameIdle;
 
         static NUPMInstallQueue()
         {
             _queue = Load();
             _wasEmpty = _queue.Count == 0;
+            _lastReloadAt = EditorApplication.timeSinceStartup; // treat static init as a reload moment
+
+            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
             EditorApplication.update += Update;
+        }
+
+        private static void OnAfterAssemblyReload()
+        {
+            _lastReloadAt = EditorApplication.timeSinceStartup;
+            _idleStart = -1; // require a fresh stable window
+        }
+
+        /// <summary>Returns a shallow snapshot of the current pending queue (order preserved).</summary>
+        public static List<NUPMInstallOp> GetPendingSnapshot()
+        {
+            return new List<NUPMInstallOp>(_queue.ToArray());
         }
 
         public static void Enqueue(IEnumerable<NUPMInstallOp> ops)
         {
             if (ops == null) return;
+
+            var added = new List<NUPMInstallOp>();
             foreach (var op in ops)
             {
                 if (op == null) continue;
                 if (string.IsNullOrEmpty(op.name) && string.IsNullOrEmpty(op.gitUrl)) continue;
                 _queue.Enqueue(op);
+                added.Add(op);
             }
-            Save(_queue);
-            _wasEmpty = _queue.Count == 0; // queue may no longer be empty
+
+            if (added.Count > 0)
+            {
+                Save(_queue);
+                _wasEmpty = _queue.Count == 0;
+                OpsEnqueued?.Invoke(added);
+            }
         }
 
         public static void Clear()
         {
             _queue.Clear();
             Save(_queue);
-            // Transition to empty — fire once.
             if (!_wasEmpty)
             {
                 _wasEmpty = true;
@@ -69,7 +99,7 @@ namespace NUPM
 
         private static void Update()
         {
-            // If empty: only notify once when transitioning to empty.
+            // If empty, emit BecameIdle only once on the transition.
             if (_queue.Count == 0)
             {
                 if (!_wasEmpty)
@@ -80,12 +110,22 @@ namespace NUPM
                 return;
             }
 
-            // Queue is non-empty.
             _wasEmpty = false;
-
             if (_processing) return;
 
-            // Wait until editor is idle for a short, stable period.
+            // Settings (with safe clamps)
+            var s = NUPMSettings.Instance;
+            double cooldown = Math.Max(0.0, s != null ? s.postReloadCooldownSeconds : 1.5f);
+            double idleNeed = Math.Max(0.2, s != null ? s.idleStableSeconds : 2.0f);
+
+            // Respect post-reload cooldown even if Editor looks idle.
+            if (EditorApplication.timeSinceStartup - _lastReloadAt < cooldown)
+            {
+                _idleStart = -1; // keep resetting until cooldown passes
+                return;
+            }
+
+            // Wait until the editor is REALLY idle for a continuous window.
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
             {
                 _idleStart = -1;
@@ -96,12 +136,14 @@ namespace NUPM
                 _idleStart = EditorApplication.timeSinceStartup;
                 return;
             }
-            if (EditorApplication.timeSinceStartup - _idleStart < 0.6f) return;
+            if (EditorApplication.timeSinceStartup - _idleStart < idleNeed)
+                return;
 
-            // Ready to process the next op
+            // Start next op
             var op = _queue.Dequeue();
             Save(_queue);
             _processing = true;
+            InstallStarted?.Invoke(op);
             _ = RunInstall(op);
         }
 
@@ -116,18 +158,19 @@ namespace NUPM
                     gitUrl = op.gitUrl ?? ""
                 };
                 await PackageInstaller.InstallPackageAsync(pkg);
+                InstallSucceeded?.Invoke(op);
             }
             catch (Exception e)
             {
                 Debug.LogError("[NUPM] Install failed: " + e.Message);
+                InstallFailed?.Invoke(op, e.Message);
             }
             finally
             {
                 _processing = false;
-                _idleStart = -1; // require idle again before next op
-
-                // If we just emptied the queue, fire BecameIdle once next Update() will detect it.
-                // (No-op here; transition is handled in Update with _wasEmpty guard.)
+                _idleStart = -1; // require a fresh idle window before the next op
+                // After this install, Unity may reload the domain; our event handler will record it.
+                // Transition to empty is handled in Update() with the _wasEmpty guard.
             }
         }
 
@@ -137,9 +180,8 @@ namespace NUPM
             {
                 string raw = EditorPrefs.GetString(QueueKey, "");
                 if (string.IsNullOrEmpty(raw)) return new Queue<NUPMInstallOp>();
-
                 var list = JsonUtility.FromJson<Wrapper>(raw);
-                if (list != null && list.items != null) return new Queue<NUPMInstallOp>(list.items);
+                if (list?.items != null) return new Queue<NUPMInstallOp>(list.items);
             }
             catch { }
             return new Queue<NUPMInstallOp>();
@@ -150,14 +192,12 @@ namespace NUPM
             try
             {
                 var w = new Wrapper { items = q.ToArray() };
-                string raw = JsonUtility.ToJson(w);
-                EditorPrefs.SetString(QueueKey, raw);
+                EditorPrefs.SetString(QueueKey, JsonUtility.ToJson(w));
             }
             catch { }
         }
 
-        [Serializable]
-        private class Wrapper { public NUPMInstallOp[] items; }
+        [Serializable] private class Wrapper { public NUPMInstallOp[] items; }
     }
 }
 #endif

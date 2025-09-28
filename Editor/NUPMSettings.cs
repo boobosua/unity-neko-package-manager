@@ -1,61 +1,79 @@
 #if UNITY_EDITOR
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using UnityEditor;
+using UnityEngine;
 
 namespace NUPM
 {
     /// <summary>
-    /// Project-scoped, versionable settings for NUPM.
+    /// Editor-only settings stored in ProjectSettings/NUPMSettings.asset.
+    /// This file is never compiled into player builds.
     /// </summary>
-    public static class NUPMSettings
+    internal sealed class NUPMSettings : ScriptableSingleton<NUPMSettings>
     {
-        private static readonly string SettingsDir = "ProjectSettings/NUPM";
-        private static readonly string SourcesPath = Path.Combine(SettingsDir, "sources.txt");
+        // ---------- Queue cadence (between package operations) ----------
+        [Min(0.2f)]
+        public float idleStableSeconds = 2.0f;          // continuous idle required before starting next op
 
-        public static List<string> LoadSources()
-        {
-            EnsureStorage();
-            if (!File.Exists(SourcesPath)) return new List<string>();
-            return File.ReadAllLines(SourcesPath)
-                    .Select(l => l.Trim())
-                    .Where(l => !string.IsNullOrEmpty(l))
-                    .Distinct()
-                    .ToList();
-        }
+        [Min(0f)]
+        public float postReloadCooldownSeconds = 1.5f;  // extra settling delay after domain reload
 
-        public static void SaveSources(IEnumerable<string> urls)
-        {
-            EnsureStorage();
-            File.WriteAllLines(SourcesPath, urls
-                .Select(u => u.Trim())
-                .Where(u => !string.IsNullOrEmpty(u))
-                .Distinct()
-                .ToArray());
-            AssetDatabase.Refresh();
-        }
+        // ---------- UPM operation polling ----------
+        [Range(20, 500)]
+        public int requestPollIntervalMs = 80;          // how often we poll PackageManager requests
 
-        public static void AddSource(string gitUrl)
-        {
-            var list = LoadSources();
-            if (!list.Contains(gitUrl)) list.Add(gitUrl);
-            SaveSources(list);
-        }
+        // ---------- UPM timeouts ----------
+        [Min(1)]
+        public int installTimeoutSeconds = 300;         // max wait for install before timeout (seconds)
 
-        public static void RemoveSource(string gitUrl)
-        {
-            var list = LoadSources();
-            if (list.Remove(gitUrl))
-                SaveSources(list);
-        }
+        [Min(1)]
+        public int uninstallTimeoutSeconds = 300;       // max wait for uninstall before timeout (seconds)
 
-        private static void EnsureStorage()
+        // ---------- UI refresh ----------
+        [Min(1)]
+        public int refreshTimeoutSeconds = 10;          // soft timeout for Browse/Installed refresh (seconds)
+
+        /// <summary>Convenience alias so other editor scripts can keep calling NUPMSettings.Instance.</summary>
+        public static NUPMSettings Instance => instance;
+
+        void OnEnable() => hideFlags = HideFlags.HideAndDontSave;
+
+        // Draw a Project Settings page under Project/NUPM
+        [SettingsProvider]
+        private static SettingsProvider CreateSettingsProvider()
         {
-            if (!Directory.Exists(SettingsDir))
+            var provider = new SettingsProvider("Project/NUPM", SettingsScope.Project)
             {
-                Directory.CreateDirectory(SettingsDir);
-            }
+                label = "NUPM",
+                guiHandler = _ =>
+                {
+                    var s = Instance;
+                    var so = new SerializedObject(s);
+
+                    EditorGUILayout.HelpBox("NUPM – Timing & Timeout Settings (Editor-only)", MessageType.Info);
+                    EditorGUILayout.Space(4);
+
+                    EditorGUILayout.LabelField("Queue cadence", EditorStyles.boldLabel);
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(idleStableSeconds)), new GUIContent("Idle Stable Seconds"));
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(postReloadCooldownSeconds)), new GUIContent("Post-Reload Cooldown (s)"));
+
+                    EditorGUILayout.Space();
+                    EditorGUILayout.LabelField("UPM operation polling", EditorStyles.boldLabel);
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(requestPollIntervalMs)), new GUIContent("Request Poll Interval (ms)"));
+
+                    EditorGUILayout.Space();
+                    EditorGUILayout.LabelField("UPM timeouts", EditorStyles.boldLabel);
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(installTimeoutSeconds)), new GUIContent("Install Timeout (s)"));
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(uninstallTimeoutSeconds)), new GUIContent("Uninstall Timeout (s)"));
+
+                    EditorGUILayout.Space();
+                    EditorGUILayout.LabelField("UI refresh", EditorStyles.boldLabel);
+                    EditorGUILayout.PropertyField(so.FindProperty(nameof(refreshTimeoutSeconds)), new GUIContent("Refresh Timeout (s)"));
+
+                    if (so.ApplyModifiedProperties())
+                        s.Save(true); // persist to ProjectSettings/NUPMSettings.asset
+                }
+            };
+            return provider;
         }
     }
 }
