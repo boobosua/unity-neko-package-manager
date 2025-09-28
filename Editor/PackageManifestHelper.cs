@@ -72,9 +72,9 @@ namespace NUPM
                 string chunk = json.Substring(braceStart + 1, braceEnd - braceStart - 1);
                 string[] lines = chunk.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                 string current = null;
-                for (int li = 0; li < lines.Length; li++)
+                foreach (var raw in lines)
                 {
-                    string line = lines[li].Trim();
+                    string line = raw.Trim();
                     if (line.StartsWith("\""))
                     {
                         int nameEnd = line.IndexOf('"', 1);
@@ -112,9 +112,9 @@ namespace NUPM
                 string chunk = json.Substring(braceStart + 1, braceEnd - braceStart - 1);
                 string[] lines = chunk.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                 string current = null;
-                for (int li = 0; li < lines.Length; li++)
+                foreach (var raw in lines)
                 {
-                    string line = lines[li].Trim();
+                    string line = raw.Trim();
                     if (line.StartsWith("\""))
                     {
                         int nameEnd = line.IndexOf('"', 1);
@@ -139,9 +139,9 @@ namespace NUPM
         private static void ParseDependencies(string depSection, Dictionary<string, string> dependencies)
         {
             string[] lines = depSection.Split(new char[] { '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i < lines.Length; i++)
+            foreach (var raw in lines)
             {
-                string cleaned = lines[i].Trim().Trim(',').Trim();
+                string cleaned = raw.Trim().Trim(',').Trim();
                 if (string.IsNullOrEmpty(cleaned)) continue;
                 int colonIndex = cleaned.IndexOf(':');
                 if (colonIndex > 0)

@@ -33,23 +33,22 @@ namespace NUPM
             string frag = m.Groups["frag"].Value;
 
             string path = ExtractPathFragment(frag);
-            List<string> candidates = new List<string>();
-            candidates.Add(string.IsNullOrEmpty(path) ? "package.json" : path.TrimEnd('/') + "/package.json");
+            var candidates = new List<string>
+            {
+                string.IsNullOrEmpty(path) ? "package.json" : path.TrimEnd('/') + "/package.json"
+            };
 
-            string[] branches = new string[] { "main", "master" };
+            string[] branches = { "main", "master" };
             string latestSha = null;
 
-            for (int bi = 0; bi < branches.Length; bi++)
+            foreach (var br in branches)
             {
-                string br = branches[bi];
-
                 if (latestSha == null)
                     latestSha = await TryFetchGithubHeadSha(owner, repo, br);
 
-                for (int ci = 0; ci < candidates.Count; ci++)
+                foreach (var rel in candidates)
                 {
-                    string rel = candidates[ci];
-                    string raw = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + br + "/" + rel;
+                    string raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{br}/{rel}";
                     string json = await TryDownloadText(raw);
                     if (!string.IsNullOrEmpty(json))
                     {
@@ -61,6 +60,76 @@ namespace NUPM
             }
 
             throw new Exception("package.json not found for " + gitUrl + " (try appending '#path=Packages/<folder>')");
+        }
+
+        /// <summary>
+        /// Returns a descriptive "name: value" string if any dependency value looks non-SemVer
+        /// (e.g., git/url), otherwise null. Used to pre-empt UPM's "Expected a 'SemVer' value".
+        /// </summary>
+        public static async Task<string> FindNonSemverDependencyAsync(string gitUrl)
+        {
+            if (string.IsNullOrEmpty(gitUrl)) return null;
+
+            Match m = GithubRepoRx.Match(gitUrl);
+            if (!m.Success) return null;
+
+            string owner = m.Groups["owner"].Value;
+            string repo = m.Groups["repo"].Value;
+            string frag = m.Groups["frag"].Value;
+
+            string path = ExtractPathFragment(frag);
+            var candidates = new List<string>
+            {
+                string.IsNullOrEmpty(path) ? "package.json" : path.TrimEnd('/') + "/package.json"
+            };
+
+            string[] branches = { "main", "master" };
+            foreach (var br in branches)
+            {
+                foreach (var rel in candidates)
+                {
+                    string raw = $"https://raw.githubusercontent.com/{owner}/{repo}/{br}/{rel}";
+                    string json = await TryDownloadText(raw);
+                    if (string.IsNullOrEmpty(json)) continue;
+
+                    // Extract dependency block text
+                    int depsStart = json.IndexOf("\"dependencies\"", StringComparison.OrdinalIgnoreCase);
+                    if (depsStart < 0) return null;
+
+                    int open = json.IndexOf('{', depsStart);
+                    if (open < 0) return null;
+                    int close = FindMatchingBrace(json, open);
+                    if (close < 0) return null;
+
+                    string deps = json.Substring(open + 1, close - open - 1);
+                    // Each entry: "name": "value"
+                    var rx = new Regex("\"(?<name>[^\"]+)\"\\s*:\\s*\"(?<ver>[^\"]+)\"");
+                    var ms = rx.Matches(deps);
+                    for (int i = 0; i < ms.Count; i++)
+                    {
+                        string name = ms[i].Groups["name"].Value.Trim();
+                        string val = ms[i].Groups["ver"].Value.Trim();
+
+                        if (LooksLikeNonSemver(val))
+                            return name + " : " + val;
+                    }
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        private static bool LooksLikeNonSemver(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return false;
+            string t = v.Trim().ToLowerInvariant();
+            if (t.Contains("http://") || t.Contains("https://") || t.EndsWith(".git") || t.Contains("git+"))
+                return true;
+
+            // Allow simple SemVer + common range prefixes ^ ~ and prerelease/build
+            // This is a permissive check; UPM will still be the final arbiter.
+            var semver = new Regex(@"^[\^~]?\d+\.\d+\.\d+([\-+][0-9A-Za-z\.-]+)?$");
+            return !semver.IsMatch(v);
         }
 
         private static string ExtractPathFragment(string frag)
@@ -89,7 +158,7 @@ namespace NUPM
         {
             try
             {
-                string url = "https://api.github.com/repos/" + owner + "/" + repo + "/commits?sha=" + branch + "&per_page=1";
+                string url = $"https://api.github.com/repos/{owner}/{repo}/commits?sha={branch}&per_page=1";
                 using (UnityWebRequest req = UnityWebRequest.Get(url))
                 {
                     req.timeout = 8;
@@ -143,16 +212,10 @@ namespace NUPM
             int brace = json.IndexOf('{', depsStart);
             if (brace < 0) return list;
 
-            int depth = 1;
-            int i = brace + 1;
-            for (; i < json.Length && depth > 0; i++)
-            {
-                if (json[i] == '{') depth++;
-                else if (json[i] == '}') depth--;
-            }
-            if (depth != 0) return list;
+            int end = FindMatchingBrace(json, brace);
+            if (end < 0) return list;
 
-            string block = json.Substring(brace + 1, i - brace - 2);
+            string block = json.Substring(brace + 1, end - brace - 1);
             Regex rx = new Regex("\"(?<name>[^\"]+)\"\\s*:\\s*\"(?<ver>[^\"]+)\"");
             MatchCollection ms = rx.Matches(block);
             foreach (Match m in ms)
@@ -162,6 +225,18 @@ namespace NUPM
                     list.Add(dep);
             }
             return list;
+        }
+
+        private static int FindMatchingBrace(string json, int startIndex)
+        {
+            int depth = 1;
+            for (int i = startIndex + 1; i < json.Length; i++)
+            {
+                if (json[i] == '{') depth++;
+                else if (json[i] == '}') depth--;
+                if (depth == 0) return i;
+            }
+            return -1;
         }
     }
 }

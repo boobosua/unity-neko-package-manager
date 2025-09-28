@@ -6,10 +6,6 @@ using UnityEditor.PackageManager.Requests;
 
 namespace NUPM
 {
-    /// <summary>
-    /// Grabs installed packages and (best-effort) git hash from packages-lock.json.
-    /// Unity 2021+ / Unity 6 safe.
-    /// </summary>
     internal static class InstalledDatabase
     {
         internal class Installed
@@ -24,10 +20,8 @@ namespace NUPM
 
         public static async Task<Dictionary<string, Installed>> SnapshotAsync()
         {
-            Dictionary<string, Installed> dict =
-                new Dictionary<string, Installed>(System.StringComparer.OrdinalIgnoreCase);
-
-            Dictionary<string, string> hashMap = PackageManifestHelper.TryReadPackagesLockGitHashMap();
+            var dict = new Dictionary<string, Installed>(System.StringComparer.OrdinalIgnoreCase);
+            var hashMap = PackageManifestHelper.TryReadPackagesLockGitHashMap();
 
             ListRequest req = Client.List(true);
             while (!req.IsCompleted) await Task.Delay(50);
@@ -36,13 +30,15 @@ namespace NUPM
             {
                 foreach (UnityEditor.PackageManager.PackageInfo p in req.Result)
                 {
-                    Installed inst = new Installed();
-                    inst.name = p.name;
-                    inst.displayName = string.IsNullOrEmpty(p.displayName) ? p.name : p.displayName;
-                    inst.version = p.version;
-                    inst.source = p.source.ToString();
-                    inst.gitUrl = ExtractGitUrlFromPackageId(p.packageId);
-                    inst.gitHash = null;
+                    var inst = new Installed
+                    {
+                        name = p.name,
+                        displayName = string.IsNullOrEmpty(p.displayName) ? p.name : p.displayName,
+                        version = p.version,
+                        source = p.source.ToString(),
+                        gitUrl = ExtractGitUrlFromPackageId(p.packageId),
+                        gitHash = null
+                    };
 
                     if (hashMap != null && hashMap.TryGetValue(p.name, out string h))
                         inst.gitHash = h;

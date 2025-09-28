@@ -48,7 +48,7 @@ namespace NUPM
         [MenuItem("Window/NUPM")]
         public static void ShowWindow()
         {
-            NUPMWindow w = GetWindow<NUPMWindow>("NUPM");
+            var w = GetWindow<NUPMWindow>("NUPM");
             w.minSize = new Vector2(720f, 480f);
         }
 
@@ -99,7 +99,8 @@ namespace NUPM
                 _pendingRefreshFromUPM = true; // defer until queue becomes idle
                 return;
             }
-            RequestRefresh(0.2);
+            // Make this immediate to reduce stale views after installs/uninstalls.
+            RequestRefresh(0.0);
         }
 
         private void OnQueueBecameIdle()
@@ -107,12 +108,12 @@ namespace NUPM
             if (_pendingRefreshFromUPM)
             {
                 _pendingRefreshFromUPM = false;
-                RequestRefresh(0.1);
+                RequestRefresh(0.0);
             }
             else
             {
-                // Still refresh once after queue completes to pick up versions/locks etc.
-                RequestRefresh(0.2);
+                // Single refresh when queue completes to pick up versions/locks etc.
+                RequestRefresh(0.0);
             }
         }
 
@@ -252,14 +253,14 @@ namespace NUPM
             if (string.IsNullOrEmpty(_search)) return src;
             string s = _search.ToLowerInvariant();
             return src.Where(p =>
-                ((p.name != null) && p.name.ToLowerInvariant().Contains(s)) ||
-                ((p.displayName != null) && p.displayName.ToLowerInvariant().Contains(s)) ||
-                ((p.description != null) && p.description.ToLowerInvariant().Contains(s)));
+                (!string.IsNullOrEmpty(p.name) && p.name.ToLowerInvariant().Contains(s)) ||
+                (!string.IsNullOrEmpty(p.displayName) && p.displayName.ToLowerInvariant().Contains(s)) ||
+                (!string.IsNullOrEmpty(p.description) && p.description.ToLowerInvariant().Contains(s)));
         }
 
         private void DrawBrowse()
         {
-            List<PackageInfo> list = new List<PackageInfo>(Filter(_catalog));
+            var list = new List<PackageInfo>(Filter(_catalog));
             if (list.Count == 0)
             {
                 string msg = _lastRefreshTimedOut
@@ -275,8 +276,8 @@ namespace NUPM
 
         private void DrawInstalled()
         {
-            HashSet<string> regNames = new HashSet<string>(_catalog.Select(c => c.name), StringComparer.OrdinalIgnoreCase);
-            List<InstalledDatabase.Installed> installedList =
+            var regNames = new HashSet<string>(_catalog.Select(c => c.name), StringComparer.OrdinalIgnoreCase);
+            var installedList =
                 (_installed != null && _installed.Values != null)
                 ? _installed.Values.Where(i => i != null && regNames.Contains(i.name)).ToList()
                 : new List<InstalledDatabase.Installed>();
@@ -287,37 +288,33 @@ namespace NUPM
                 return;
             }
 
-            List<InstalledRow> rows = new List<InstalledRow>();
-            for (int idx = 0; idx < installedList.Count; idx++)
+            var rows = new List<InstalledRow>();
+            foreach (var i in installedList)
             {
-                InstalledDatabase.Installed i = installedList[idx];
                 PackageInfo remote = null;
                 if (i != null && i.name != null)
                     PackageRegistry.TryGetByName(i.name, out remote);
 
                 bool hasUpdate = HasUpdate(remote, i);
-                InstalledRow row = new InstalledRow();
-                row.Inst = i; row.Remote = remote; row.HasUpdate = hasUpdate;
-                rows.Add(row);
+                rows.Add(new InstalledRow { Inst = i, Remote = remote, HasUpdate = hasUpdate });
             }
 
-            rows.Sort(delegate (InstalledRow a, InstalledRow b)
+            rows.Sort((a, b) =>
             {
                 int byUpdate = b.HasUpdate.CompareTo(a.HasUpdate);
                 if (byUpdate != 0) return byUpdate;
-                string an = (a.Inst != null && a.Inst.displayName != null) ? a.Inst.displayName : "";
-                string bn = (b.Inst != null && b.Inst.displayName != null) ? b.Inst.displayName : "";
+                string an = a.Inst?.displayName ?? "";
+                string bn = b.Inst?.displayName ?? "";
                 return string.Compare(an, bn, StringComparison.OrdinalIgnoreCase);
             });
 
             string s = string.IsNullOrEmpty(_search) ? null : _search.ToLowerInvariant();
-            for (int r = 0; r < rows.Count; r++)
+            foreach (var row in rows)
             {
-                InstalledRow row = rows[r];
                 if (s != null)
                 {
-                    string n = (row.Inst != null && row.Inst.name != null) ? row.Inst.name.ToLowerInvariant() : "";
-                    string dn = (row.Inst != null && row.Inst.displayName != null) ? row.Inst.displayName.ToLowerInvariant() : "";
+                    string n = row.Inst?.name?.ToLowerInvariant() ?? "";
+                    string dn = row.Inst?.displayName?.ToLowerInvariant() ?? "";
                     if (!(n.Contains(s) || dn.Contains(s))) continue;
                 }
                 DrawInstalledCard(row.Inst, row.Remote, row.HasUpdate);
@@ -326,9 +323,14 @@ namespace NUPM
 
         private void DrawPackageCard(PackageInfo pkg, bool showUpdateBadge)
         {
-            bool isInstalled = (_installed != null) && _installed.ContainsKey(pkg.name);
-            InstalledDatabase.Installed inst;
-            if (_installed == null || !_installed.TryGetValue(pkg.name, out inst)) inst = null;
+            // FIX: avoid "unassigned local variable"
+            InstalledDatabase.Installed inst = null;
+            bool isInstalled = false;
+            if (_installed != null)
+            {
+                isInstalled = _installed.ContainsKey(pkg.name);
+                _installed.TryGetValue(pkg.name, out inst);
+            }
 
             bool hasUpdate = showUpdateBadge && HasUpdate(pkg, inst);
 
@@ -336,8 +338,7 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    GUIStyle title = new GUIStyle(EditorStyles.label);
-                    title.fontSize = 16; title.fontStyle = FontStyle.Bold;
+                    var title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
                     GUILayout.Label(pkg.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
@@ -378,8 +379,7 @@ namespace NUPM
             {
                 using (new GUILayout.HorizontalScope())
                 {
-                    GUIStyle title = new GUIStyle(EditorStyles.label);
-                    title.fontSize = 16; title.fontStyle = FontStyle.Bold;
+                    var title = new GUIStyle(EditorStyles.label) { fontSize = 16, fontStyle = FontStyle.Bold };
                     GUILayout.Label(inst.displayName, title);
                     GUILayout.FlexibleSpace();
                     if (hasUpdate) GUILayout.Label("Update available", EditorStyles.miniBoldLabel, GUILayout.Width(120));
@@ -436,7 +436,7 @@ namespace NUPM
         private static Version SafeVer(string s)
         {
             if (string.IsNullOrEmpty(s)) return new Version(0, 0, 0);
-            try { return new Version(s.Split(new char[] { '+', '-', ' ' })[0]); }
+            try { return new Version(s.Split(new[] { '+', '-', ' ' })[0]); }
             catch { return new Version(0, 0, 0); }
         }
 
@@ -446,28 +446,34 @@ namespace NUPM
         {
             try
             {
-                // Always synchronize with UPM first to avoid stale state.
+                // Advisory only if package.json contains non-SemVer dependency values.
+                try
+                {
+                    string bad = await GitMetadataFetcher.FindNonSemverDependencyAsync(root.gitUrl);
+                    if (!string.IsNullOrEmpty(bad))
+                        Debug.LogWarning($"[NUPM] '{root.displayName}' contains a non-SemVer dependency in package.json: {bad}");
+                }
+                catch { /* advisory only */ }
+
+                // Always synchronize with UPM before figuring out what is missing.
                 Dictionary<string, InstalledDatabase.Installed> installedNow = await InstalledDatabase.SnapshotAsync();
 
                 // 1) Resolve Git deps (deps-first, includes root)
                 DependencyResolver resolver = new DependencyResolver();
                 List<PackageInfo> order = resolver.ResolveDependencies(root, _catalog);
 
-                // 2) Merge Unity-by-name deps (e.g., Newtonsoft) from live package.json for root + each git dep
+                // 2) Merge Unity-by-name deps from live package.json for root + each git dep
                 HashSet<string> nameDeps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                Action<PackageInfo> collectFrom = delegate (PackageInfo pkg)
+                void CollectFrom(PackageInfo pkg)
                 {
                     if (pkg == null || pkg.dependencies == null) return;
-                    for (int i = 0; i < pkg.dependencies.Count; i++)
-                    {
-                        string d = pkg.dependencies[i];
+                    foreach (var d in pkg.dependencies)
                         if (!string.IsNullOrEmpty(d) && d.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
                             nameDeps.Add(d);
-                    }
-                };
+                }
 
-                collectFrom(root);
-                for (int i = 0; i < order.Count; i++) collectFrom(order[i]);
+                CollectFrom(root);
+                foreach (var p in order) CollectFrom(p);
 
                 async Task MergeLiveDeps(PackageInfo p)
                 {
@@ -477,9 +483,8 @@ namespace NUPM
                         PackageInfo live = await GitMetadataFetcher.FetchAsync(p.gitUrl);
                         if (live != null && live.dependencies != null)
                         {
-                            for (int j = 0; j < live.dependencies.Count; j++)
+                            foreach (var d in live.dependencies)
                             {
-                                string d = live.dependencies[j];
                                 if (!string.IsNullOrEmpty(d) && d.StartsWith("com.unity.", StringComparison.OrdinalIgnoreCase))
                                     nameDeps.Add(d);
                                 if (p.dependencies != null && !p.dependencies.Contains(d))
@@ -490,13 +495,12 @@ namespace NUPM
                     catch { }
                 }
                 await MergeLiveDeps(root);
-                for (int i = 0; i < order.Count; i++) await MergeLiveDeps(order[i]);
+                foreach (var p in order) await MergeLiveDeps(p);
 
-                // 3) Compute what is actually missing RIGHT NOW (fresh UPM snapshot)
+                // 3) Compute what is actually missing RIGHT NOW
                 List<PackageInfo> gitToInstall = new List<PackageInfo>();
-                for (int i = 0; i < order.Count; i++)
+                foreach (var p in order)
                 {
-                    PackageInfo p = order[i];
                     bool already = installedNow != null && installedNow.ContainsKey(p.name);
                     if (!already) gitToInstall.Add(p);
                 }
@@ -512,13 +516,10 @@ namespace NUPM
                 if (nameDepsMissing.Count > 0 || gitToInstall.Any(p => !string.Equals(p.name, root.name, StringComparison.OrdinalIgnoreCase)))
                 {
                     List<string> displayList = new List<string>();
-                    for (int i = 0; i < nameDepsMissing.Count; i++) displayList.Add(nameDepsMissing[i]);
-                    for (int i = 0; i < gitToInstall.Count; i++)
-                    {
-                        PackageInfo g = gitToInstall[i];
+                    displayList.AddRange(nameDepsMissing);
+                    foreach (var g in gitToInstall)
                         if (!string.Equals(g.name, root.name, StringComparison.OrdinalIgnoreCase))
                             displayList.Add(g.name);
-                    }
 
                     if (displayList.Count > 0)
                     {
@@ -534,16 +535,11 @@ namespace NUPM
 
                 // 5) Build queue: name deps first, then git deps (deps-first order preserved)
                 List<NUPMInstallOp> ops = new List<NUPMInstallOp>();
-                for (int i = 0; i < nameDepsMissing.Count; i++)
-                {
-                    string n = nameDepsMissing[i];
+                foreach (var n in nameDepsMissing)
                     ops.Add(new NUPMInstallOp { name = n, display = n, gitUrl = null });
-                }
-                for (int i = 0; i < gitToInstall.Count; i++)
-                {
-                    PackageInfo p = gitToInstall[i];
+
+                foreach (var p in gitToInstall)
                     ops.Add(new NUPMInstallOp { name = p.name, display = p.displayName, gitUrl = p.gitUrl });
-                }
 
                 if (ops.Count == 0)
                 {
@@ -571,13 +567,15 @@ namespace NUPM
             }
         }
 
-        // NOTE: no 'async' modifier; returns a completed Task. This removes the analyzer warning.
+        // NOTE: no 'async' modifier; returns a completed Task. This removes analyzer warnings.
         private Task UpdatePackageAsync(PackageInfo latest)
         {
             try
             {
-                List<NUPMInstallOp> ops = new List<NUPMInstallOp>();
-                ops.Add(new NUPMInstallOp { name = latest.name, display = latest.displayName, gitUrl = latest.gitUrl });
+                var ops = new List<NUPMInstallOp>
+                {
+                    new NUPMInstallOp { name = latest.name, display = latest.displayName, gitUrl = latest.gitUrl }
+                };
                 NUPMInstallQueue.Enqueue(ops);
                 EditorUtility.DisplayDialog("Queued", "Queued update for " + latest.displayName + ".", "OK");
             }
@@ -594,11 +592,11 @@ namespace NUPM
             try
             {
                 // Take a fresh snapshot so we know current dependents.
-                Dictionary<string, InstalledDatabase.Installed> installedNow = await InstalledDatabase.SnapshotAsync();
-                List<string> installedKeys = (installedNow != null) ? new List<string>(installedNow.Keys) : new List<string>();
-                HashSet<string> installedCustom = new HashSet<string>(installedKeys, StringComparer.OrdinalIgnoreCase);
+                var installedNow = await InstalledDatabase.SnapshotAsync();
+                var installedKeys = (installedNow != null) ? new List<string>(installedNow.Keys) : new List<string>();
+                var installedCustom = new HashSet<string>(installedKeys, StringComparer.OrdinalIgnoreCase);
 
-                List<PackageInfo> dependents = _catalog
+                var dependents = _catalog
                     .Where(p => p.dependencies != null && p.dependencies.Contains(package.name))
                     .Where(p => installedCustom.Contains(p.name))
                     .ToList();
@@ -613,8 +611,8 @@ namespace NUPM
                         "Cancel");
                     if (!alsoUninstall) return;
 
-                    for (int i = 0; i < dependents.Count; i++)
-                        await PackageInstaller.UninstallPackageAsync(new PackageInfo { name = dependents[i].name, displayName = dependents[i].displayName });
+                    foreach (var dep in dependents)
+                        await PackageInstaller.UninstallPackageAsync(new PackageInfo { name = dep.name, displayName = dep.displayName });
                 }
 
                 bool proceed = EditorUtility.DisplayDialog(
@@ -624,13 +622,41 @@ namespace NUPM
                 if (!proceed) return;
 
                 await PackageInstaller.UninstallPackageAsync(package);
-                RequestRefresh(0.3);
+
+                // NEW: wait until the editor is idle and then force a real refresh.
+                await AwaitEditorIdleAsync(0.6, 20.0);
+                await RefreshAsyncCoalesced();
+
                 EditorUtility.DisplayDialog("Success", package.displayName + " uninstalled successfully!", "OK");
             }
             catch (Exception e)
             {
                 EditorUtility.DisplayDialog("Error", "Uninstallation failed:\n" + e.Message, "OK");
                 Debug.LogError("[NUPM] Uninstall error: " + e);
+            }
+        }
+
+        /// <summary>
+        /// Waits until the editor is not compiling/updating for a stable window.
+        /// </summary>
+        private static async Task AwaitEditorIdleAsync(double stableSeconds, double timeoutSeconds)
+        {
+            double stableStart = -1.0;
+            double tEnd = EditorApplication.timeSinceStartup + Math.Max(1.0, timeoutSeconds);
+
+            while (EditorApplication.timeSinceStartup < tEnd)
+            {
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                {
+                    stableStart = -1.0;
+                }
+                else
+                {
+                    if (stableStart < 0.0) stableStart = EditorApplication.timeSinceStartup;
+                    if (EditorApplication.timeSinceStartup - stableStart >= Math.Max(0.1, stableSeconds))
+                        return;
+                }
+                await Task.Delay(50);
             }
         }
     }

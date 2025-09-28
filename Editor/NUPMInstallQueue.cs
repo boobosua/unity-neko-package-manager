@@ -15,6 +15,11 @@ namespace NUPM
         public string gitUrl;     // null/empty => install by name
     }
 
+    /// <summary>
+    /// Persisted queue that survives domain reloads. Installs exactly one package when the Editor is idle,
+    /// then waits for import/compile to finish before attempting the next.
+    /// Emits BecameIdle **only once** when the queue transitions to empty.
+    /// </summary>
     [InitializeOnLoad]
     internal static class NUPMInstallQueue
     {
@@ -23,14 +28,17 @@ namespace NUPM
         private static bool _processing;
         private static double _idleStart = -1;
 
-        public static bool IsBusy { get { return _processing || _queue.Count > 0; } }
+        private static bool _wasEmpty = true;   // <-- transition guard
 
-        // New: notify when queue becomes idle so windows can refresh
+        public static bool IsBusy => _processing || _queue.Count > 0;
+
+        /// <summary>Raised exactly once when the queue transitions from non-empty to empty.</summary>
         public static event Action BecameIdle;
 
         static NUPMInstallQueue()
         {
             _queue = Load();
+            _wasEmpty = _queue.Count == 0;
             EditorApplication.update += Update;
         }
 
@@ -44,24 +52,38 @@ namespace NUPM
                 _queue.Enqueue(op);
             }
             Save(_queue);
+            _wasEmpty = _queue.Count == 0; // queue may no longer be empty
         }
 
         public static void Clear()
         {
             _queue.Clear();
             Save(_queue);
+            // Transition to empty — fire once.
+            if (!_wasEmpty)
+            {
+                _wasEmpty = true;
+                BecameIdle?.Invoke();
+            }
         }
 
         private static void Update()
         {
-            if (_processing) return;
-
-            // If queue is empty, emit idle once.
+            // If empty: only notify once when transitioning to empty.
             if (_queue.Count == 0)
             {
-                if (BecameIdle != null) BecameIdle();
+                if (!_wasEmpty)
+                {
+                    _wasEmpty = true;
+                    BecameIdle?.Invoke();
+                }
                 return;
             }
+
+            // Queue is non-empty.
+            _wasEmpty = false;
+
+            if (_processing) return;
 
             // Wait until editor is idle for a short, stable period.
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
@@ -87,11 +109,12 @@ namespace NUPM
         {
             try
             {
-                var pkg = new PackageInfo();
-                pkg.name = string.IsNullOrEmpty(op.name) ? "(git)" : op.name;
-                pkg.displayName = string.IsNullOrEmpty(op.display) ? pkg.name : op.display;
-                pkg.gitUrl = op.gitUrl ?? "";
-
+                var pkg = new PackageInfo
+                {
+                    name = string.IsNullOrEmpty(op.name) ? "(git)" : op.name,
+                    displayName = string.IsNullOrEmpty(op.display) ? (string.IsNullOrEmpty(op.name) ? "(git)" : op.name) : op.display,
+                    gitUrl = op.gitUrl ?? ""
+                };
                 await PackageInstaller.InstallPackageAsync(pkg);
             }
             catch (Exception e)
@@ -102,7 +125,9 @@ namespace NUPM
             {
                 _processing = false;
                 _idleStart = -1; // require idle again before next op
-                if (_queue.Count == 0 && BecameIdle != null) BecameIdle();
+
+                // If we just emptied the queue, fire BecameIdle once next Update() will detect it.
+                // (No-op here; transition is handled in Update with _wasEmpty guard.)
             }
         }
 
@@ -124,8 +149,7 @@ namespace NUPM
         {
             try
             {
-                var w = new Wrapper();
-                w.items = q.ToArray();
+                var w = new Wrapper { items = q.ToArray() };
                 string raw = JsonUtility.ToJson(w);
                 EditorPrefs.SetString(QueueKey, raw);
             }
