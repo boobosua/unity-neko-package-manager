@@ -7,14 +7,14 @@ namespace NUPM
     [Serializable]
     public class PackageInfo
     {
-        public string name;
-        public string displayName;
+        public string name;           // e.g. com.nekoindie.nekounity.lib
+        public string displayName;    // e.g. NekoLib
         public string version;
         public string description;
-        public string gitUrl;
+        public string gitUrl;         // empty => install by name (Unity registry)
         public List<string> dependencies;
 
-        // Remote HEAD commit SHA (for Git packages). Lets us show Update even if SemVer didn't bump.
+        // Remote HEAD commit SHA (for Git packages) to surface Update even if SemVer didn't bump.
         public string latestCommitSha;
 
         public PackageInfo()

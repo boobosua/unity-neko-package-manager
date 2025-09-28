@@ -51,23 +51,3 @@ Click **Update** to install the latest version from Git.
 
 In the **Installed** tab, click **Uninstall** to remove a package.  
 This syncs with UPM – if removed directly from UPM, NUPM updates too.
-
-## API
-
-### PackageInstaller
-
-- `InstallPackageAsync(PackageInfo)` – Install or update via Git URL
-- `UninstallPackageAsync(PackageInfo)` – Remove package from project
-
-### DependencyResolver
-
-- `ResolveDependencies(root, tryGetByName)` – Returns installation order including dependencies
-
-### PackageRegistry
-
-- `RefreshAsync()` – Refresh registry from internal definitions
-- `TryGetByName(name, out PackageInfo)` – Lookup package by ID
-
-### InstalledDatabase
-
-- `SnapshotAsync()` – Get currently installed packages from UPM

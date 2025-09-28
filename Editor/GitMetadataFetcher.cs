@@ -11,7 +11,7 @@ namespace NUPM
     /// <summary>
     /// Reads package.json (and HEAD sha) from GitHub gitUrl.
     /// Supports optional '#path=Packages/XXX' fragment.
-    /// Unity 2021+ / Unity 6 safe (uses UnityWebRequest.result).
+    /// Unity 2021+ / Unity 6 safe.
     /// </summary>
     internal static class GitMetadataFetcher
     {

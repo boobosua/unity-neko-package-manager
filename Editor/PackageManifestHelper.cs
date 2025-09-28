@@ -13,8 +13,7 @@ namespace NUPM
     }
 
     /// <summary>
-    /// Unity 2021+ safe: uses synchronous File IO (more compatible across scripting backends),
-    /// with tiny best-effort JSON parses (no JSON lib dependency).
+    /// Unity 2021+ safe: simple file IO + best-effort parsing (no JSON lib dependency).
     /// </summary>
     public static class PackageManifestHelper
     {
@@ -23,7 +22,6 @@ namespace NUPM
 
         public static System.Threading.Tasks.Task<PackageManifest> ReadManifestAsync()
         {
-            // Synchronous read wrapped in Task.FromResult to keep call sites async-friendly and Unity 2021 safe.
             try
             {
                 if (!File.Exists(ManifestPath))
@@ -58,7 +56,6 @@ namespace NUPM
             return manifest.dependencies.ContainsKey(packageName);
         }
 
-        // Version map (best-effort) — for completeness if you use it elsewhere
         public static Dictionary<string, string> TryReadPackagesLockVersionMap()
         {
             Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -99,7 +96,6 @@ namespace NUPM
             return map;
         }
 
-        // Git hash map from packages-lock.json (best-effort) — works in 2021+ / 6
         public static Dictionary<string, string> TryReadPackagesLockGitHashMap()
         {
             Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
