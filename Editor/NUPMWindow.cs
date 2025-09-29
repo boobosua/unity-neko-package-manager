@@ -22,10 +22,10 @@ namespace NUPM
 
         private sealed class TrackOp
         {
-            public string id;         // package id (name or "(git)")
-            public string display;    // display name
+            public string id;      // package id (name or "(git)")
+            public string display; // display name
             public OpState state;
-            public string error;      // if Failed
+            public string error;   // if Failed
         }
 
         private Tab _tab = Tab.Browse;
@@ -45,7 +45,7 @@ namespace NUPM
         private double _delayedRefreshUntil;
 
         private bool _bootstrapRetryHooked;
-        private int _bootstrapRetriesLeft = 3;  // gentle retries
+        private int _bootstrapRetriesLeft = 3;
         private double _nextRetryAt;
 
         private bool _lastRefreshTimedOut;
@@ -74,6 +74,8 @@ namespace NUPM
             }
 
             UnityEditor.PackageManager.Events.registeredPackages += OnRegisteredPackages;
+
+            // queue events
             NUPMInstallQueue.BecameIdle += OnQueueBecameIdle;
             NUPMInstallQueue.OpsEnqueued += OnOpsEnqueued;
             NUPMInstallQueue.InstallStarted += OnInstallStarted;
@@ -89,6 +91,7 @@ namespace NUPM
         private void OnDisable()
         {
             UnityEditor.PackageManager.Events.registeredPackages -= OnRegisteredPackages;
+
             NUPMInstallQueue.BecameIdle -= OnQueueBecameIdle;
             NUPMInstallQueue.OpsEnqueued -= OnOpsEnqueued;
             NUPMInstallQueue.InstallStarted -= OnInstallStarted;
@@ -149,7 +152,7 @@ namespace NUPM
 
         private void OnInstallStarted(NUPMInstallOp op)
         {
-            var id = string.IsNullOrEmpty(op.name) ? "(git)" : op.name;
+            var id = !string.IsNullOrEmpty(op.name) ? op.name : "(git)";
             if (_byId.TryGetValue(id, out var t)) t.state = OpState.Installing;
             else TrackOrCreate(op.name, op.display, OpState.Installing, null);
             Repaint();
@@ -157,7 +160,7 @@ namespace NUPM
 
         private void OnInstallSucceeded(NUPMInstallOp op)
         {
-            var id = string.IsNullOrEmpty(op.name) ? "(git)" : op.name;
+            var id = !string.IsNullOrEmpty(op.name) ? op.name : "(git)";
             if (_byId.TryGetValue(id, out var t)) { t.state = OpState.Done; t.error = null; }
             else TrackOrCreate(op.name, op.display, OpState.Done, null);
             Repaint();
@@ -165,7 +168,7 @@ namespace NUPM
 
         private void OnInstallFailed(NUPMInstallOp op, string error)
         {
-            var id = string.IsNullOrEmpty(op.name) ? "(git)" : op.name;
+            var id = !string.IsNullOrEmpty(op.name) ? op.name : "(git)";
             if (_byId.TryGetValue(id, out var t)) { t.state = OpState.Failed; t.error = error; }
             else TrackOrCreate(op.name, op.display, OpState.Failed, error);
             Repaint();
@@ -321,7 +324,7 @@ namespace NUPM
             DrawToolbar();
             DrawInstallQueuePanel(); // visual status
 
-            // While anything is in progress, we hide the Browse list (per your request)
+            // While anything is in progress, hide the Browse list (your request)
             bool inProgress = IsInstallInProgress();
 
             _scroll = GUILayout.BeginScrollView(_scroll);
@@ -331,7 +334,7 @@ namespace NUPM
                 if (inProgress)
                 {
                     EditorGUILayout.HelpBox("Installing… Please wait for the current queue to finish.", MessageType.Info);
-                    // Do not draw the package list here (prevents opening more installs).
+                    // Do not draw package list here (prevents opening more installs).
                 }
                 else
                 {
@@ -396,7 +399,7 @@ namespace NUPM
                 {
                     using (new GUILayout.HorizontalScope())
                     {
-                        // No icons/symbols requested, just the state text
+                        // No icons/symbols; just state text
                         GUILayout.Label(t.display + "  (" + t.id + ")", EditorStyles.miniLabel);
                         GUILayout.FlexibleSpace();
                         string text = t.state switch
@@ -620,7 +623,7 @@ namespace NUPM
         {
             try
             {
-                // Advisory only if package.json contains non-SemVer dependency values.
+                // Fail fast for invalid non-SemVer dependency entries in root package.json
                 try
                 {
                     string bad = await GitMetadataFetcher.FindNonSemverDependencyAsync(root.gitUrl);
@@ -836,7 +839,6 @@ namespace NUPM
         private bool IsInstallInProgress()
         {
             if (NUPMInstallQueue.IsBusy) return true;
-            // If we have any item that's Pending or Installing, treat it as in progress.
             for (int i = 0; i < _tracked.Count; i++)
             {
                 var s = _tracked[i].state;
