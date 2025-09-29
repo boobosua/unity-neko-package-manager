@@ -1,6 +1,6 @@
 {
   "name": "com.nekoindie.nekounity.nupm",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "displayName": "Neko Unity Package Manager (NUPM)",
   "description": "A custom package manager for Neko Unity libraries with dependency resolution and Git integration.",
   "unity": "2020.3",

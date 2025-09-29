@@ -45,7 +45,7 @@ namespace NUPM
         private double _delayedRefreshUntil;
 
         private bool _bootstrapRetryHooked;
-        private int _bootstrapRetriesLeft = 3;  // gentle
+        private int _bootstrapRetriesLeft = 3;  // gentle retries
         private double _nextRetryAt;
 
         private bool _lastRefreshTimedOut;
@@ -321,9 +321,28 @@ namespace NUPM
             DrawToolbar();
             DrawInstallQueuePanel(); // visual status
 
+            // While anything is in progress, we hide the Browse list (per your request)
+            bool inProgress = IsInstallInProgress();
+
             _scroll = GUILayout.BeginScrollView(_scroll);
-            if (_tab == Tab.Browse) DrawBrowse();
-            else DrawInstalled();
+
+            if (_tab == Tab.Browse)
+            {
+                if (inProgress)
+                {
+                    EditorGUILayout.HelpBox("Installing… Please wait for the current queue to finish.", MessageType.Info);
+                    // Do not draw the package list here (prevents opening more installs).
+                }
+                else
+                {
+                    DrawBrowse();
+                }
+            }
+            else
+            {
+                DrawInstalled();
+            }
+
             GUILayout.EndScrollView();
 
             TryBeginBootstrapRetries();
@@ -369,7 +388,7 @@ namespace NUPM
 
                 if (_tracked.Count == 0)
                 {
-                    GUILayout.Label("Waiting…", EditorStyles.miniLabel);
+                    GUILayout.Label("Pending…", EditorStyles.miniLabel);
                     return;
                 }
 
@@ -377,26 +396,18 @@ namespace NUPM
                 {
                     using (new GUILayout.HorizontalScope())
                     {
-                        string badge = t.state switch
-                        {
-                            OpState.Pending => "•",
-                            OpState.Installing => "▶",
-                            OpState.Done => "✓",
-                            OpState.Failed => "✗",
-                            _ => "•"
-                        };
-                        GUILayout.Label(badge, GUILayout.Width(16));
+                        // No icons/symbols requested, just the state text
                         GUILayout.Label(t.display + "  (" + t.id + ")", EditorStyles.miniLabel);
                         GUILayout.FlexibleSpace();
                         string text = t.state switch
                         {
-                            OpState.Pending => "Pending",
+                            OpState.Pending => "Pending…",
                             OpState.Installing => "Installing…",
                             OpState.Done => "Done",
                             OpState.Failed => "Failed",
                             _ => ""
                         };
-                        GUILayout.Label(text, EditorStyles.miniBoldLabel, GUILayout.Width(80));
+                        GUILayout.Label(text, EditorStyles.miniBoldLabel, GUILayout.Width(90));
                     }
 
                     if (t.state == OpState.Failed && !string.IsNullOrEmpty(t.error))
@@ -508,6 +519,9 @@ namespace NUPM
                 if (pkg.dependencies != null && pkg.dependencies.Count > 0)
                     GUILayout.Label("Dependencies: " + string.Join(", ", pkg.dependencies.ToArray()), EditorStyles.miniLabel);
 
+                // Disable action buttons while queue is busy/in progress
+                bool disableActions = IsInstallInProgress();
+                EditorGUI.BeginDisabledGroup(disableActions);
                 using (new GUILayout.HorizontalScope())
                 {
                     GUILayout.FlexibleSpace();
@@ -527,6 +541,7 @@ namespace NUPM
                             _ = UninstallPackageAsync(new PackageInfo { name = pkg.name, displayName = pkg.displayName });
                     }
                 }
+                EditorGUI.EndDisabledGroup();
             }
         }
 
@@ -550,6 +565,9 @@ namespace NUPM
                 if (remote != null && !string.IsNullOrEmpty(remote.latestCommitSha))
                     GUILayout.Label("Latest SHA: " + remote.latestCommitSha, EditorStyles.miniLabel);
 
+                // Disable action buttons while queue is busy/in progress
+                bool disableActions = IsInstallInProgress();
+                EditorGUI.BeginDisabledGroup(disableActions);
                 using (new GUILayout.HorizontalScope())
                 {
                     GUILayout.FlexibleSpace();
@@ -561,6 +579,7 @@ namespace NUPM
                     if (GUILayout.Button("Uninstall", GUILayout.Width(90)))
                         _ = UninstallPackageAsync(new PackageInfo { name = inst.name, displayName = inst.displayName });
                 }
+                EditorGUI.EndDisabledGroup();
             }
         }
 
@@ -606,7 +625,14 @@ namespace NUPM
                 {
                     string bad = await GitMetadataFetcher.FindNonSemverDependencyAsync(root.gitUrl);
                     if (!string.IsNullOrEmpty(bad))
-                        Debug.LogWarning($"[NUPM] '{root.displayName}' contains a non-SemVer dependency in package.json: {bad}");
+                    {
+                        EditorUtility.DisplayDialog(
+                            "Invalid dependency versions",
+                            $"\"{root.displayName}\" contains dependency entries that are not SemVer strings:\n\n{bad}\n\n" +
+                            "Fix the package.json (use versions like \"1.9.4\"), push, and try again.",
+                            "OK");
+                        return;
+                    }
                 }
                 catch { /* advisory only */ }
 
@@ -804,6 +830,19 @@ namespace NUPM
                 }
                 await Task.Delay(80);
             }
+        }
+
+        // ---- Helper: are we mid-install from the user's POV? ----
+        private bool IsInstallInProgress()
+        {
+            if (NUPMInstallQueue.IsBusy) return true;
+            // If we have any item that's Pending or Installing, treat it as in progress.
+            for (int i = 0; i < _tracked.Count; i++)
+            {
+                var s = _tracked[i].state;
+                if (s == OpState.Pending || s == OpState.Installing) return true;
+            }
+            return false;
         }
     }
 }
